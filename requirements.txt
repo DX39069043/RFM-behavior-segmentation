@@ -1,0 +1,16 @@
+# 数据处理与科学计算核心库
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 可视化库
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.15.0
+
+# 机器学习库
+scikit-learn>=1.2.0
+
+# Jupyter 环境与交互工具
+jupyter
+ipython
+openpyxl
