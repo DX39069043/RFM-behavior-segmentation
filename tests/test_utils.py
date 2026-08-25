@@ -13,10 +13,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 
-from analysis import (build_features, buyer_baseline, compute_engagement_metrics,
-                      export_tracking, flag_buyer_silence, gmm_intersection_threshold,
-                      load_panel, rate_test, rolling_validation, score_buyers,
-                      score_nonbuyers, segment_users)
+from analysis import (build_features, buyer_baseline, cohort_migration,
+                      compute_engagement_metrics, export_tracking, flag_buyer_silence,
+                      gmm_intersection_threshold, load_panel, rate_test, rolling_validation,
+                      score_buyers, score_nonbuyers, segment_users)
 
 
 def make_events(n_users: int = 6) -> pd.DataFrame:
@@ -75,11 +75,8 @@ class TestComputeEngagementMetrics(unittest.TestCase):
 
     def test_friction_definition(self):
         out = compute_engagement_metrics(self.df)
-        np.testing.assert_allclose(out['Friction_0'], [3, 4, 4])     # max(加购-购买, 0)
-        # 展示列 = Friction_0（已购臂高摩擦改由跨月沉默标记，不再用浏览成本）
-        np.testing.assert_allclose(out['Friction'], [3, 4, 4])
+        np.testing.assert_allclose(out['Friction'], [3, 4, 4])      # max(加购-购买, 0)
         self.assertTrue(np.allclose(out['Log_Friction'], np.log1p(out['Friction'])))
-        self.assertTrue(np.allclose(out['Log_Friction_0'], np.log1p(out['Friction_0'])))
         self.assertNotIn('Friction_1', out.columns)
 
     def test_escore_definition(self):
@@ -98,8 +95,8 @@ class TestBuildFeatures(unittest.TestCase):
         feats = build_features(events, obs_end)
         for col in ['user_id', 'Purchase_Frequency', 'Total_Spending', 'Pages_Viewed',
                     'Estimated_Time', 'Recency_Days', 'Session_Count',
-                    'Cart_Products', 'Purchased_Products', 'E_Score',
-                    'Friction_0', 'Friction']:
+                    'Cart_Products', 'Purchased_Products', 'E_Score', 'Friction',
+                    'Log_Friction']:
             self.assertIn(col, feats.columns)
         self.assertNotIn('Friction_1', feats.columns)
         buyer = feats[feats['user_id'] == 1].iloc[0]
@@ -129,7 +126,7 @@ class TestSegmentUsers(unittest.TestCase):
             ['高潜力首购用户', '普通浏览用户', '常规已购用户', '高价值直购用户',
              '高价值深度互动用户']).all())
         for key in ['vip_value_index_cutoff', 'nonbuyer_e_score_cutoff',
-                    'nonbuyer_log_friction0_cutoff', 'vip_e_score_cutoff']:
+                    'nonbuyer_log_friction_cutoff', 'vip_e_score_cutoff']:
             self.assertIn(key, meta)
         self.assertNotIn('vip_log_friction1_cutoff', meta)
 
@@ -288,7 +285,7 @@ class TestRollingValidation(unittest.TestCase):
         self.assertEqual(set(exp1['训练月']), {'2019-10', '2019-11', '2019-12'})
         self.assertEqual(set(exp2['沉默月']), {'2019-11', '2019-12'})
         for col in ['训练月', '沉默月', '验证月', '实验', '目标人数', '目标购买率',
-                    '对照人数', '对照购买率', '风险差', 'p值']:
+                    '对照人数', '对照购买率', '购买率差', 'p值']:
             self.assertIn(col, rates.columns)
         self.assertIsInstance(res['基准表'], pd.DataFrame)
 
@@ -303,6 +300,47 @@ class TestRollingValidation(unittest.TestCase):
             self.assertEqual(len(panel), len(ev))
         finally:
             os.remove(path)
+
+
+class TestCohortMigration(unittest.TestCase):
+    """队列迁移分析：固定基期分层 → 逐月追踪同一批用户（合成面板）。"""
+
+    def _panel(self):
+        frames = []
+        for mi, month in enumerate(['2019-10', '2019-11', '2019-12', '2020-01']):
+            ev = make_events(10)
+            if mi > 0:                              # 后续月份只保留一半用户 → 另一半沉默
+                ev = ev[ev['user_id'] % 2 == 0]
+            ev['event_time'] = ev['event_time'] + pd.Timedelta(days=mi * 31)
+            ev['month'] = month
+            frames.append(ev)
+        return pd.concat(frames, ignore_index=True)
+
+    def test_cohort_migration_outputs(self):
+        # cohort_migration 返回冻结标签占比表（基期标签 × 月份 × 冻结标签）
+        panel = self._panel()
+        months = ['2019-10', '2019-11', '2019-12', '2020-01']
+        frozen = cohort_migration(panel, '2019-10', months=months)
+        n_after = 3
+        self.assertEqual(len(frozen), frozen['基期标签'].nunique() * n_after)
+        self.assertIn('基期标签', frozen.columns)
+        self.assertIn('month', frozen.columns)
+        # 当月无任何事件的用户应记为"无任何活动"
+        self.assertIn('无任何活动', frozen.columns)
+        # 每个基期标签 × 月份的行内占比之和应为 1
+        rows = frozen.set_index(['基期标签', 'month'])
+        self.assertTrue(np.allclose(rows.sum(axis=1).to_numpy(), 1.0, atol=1e-9))
+
+    def test_frozen_thresholds_consistency(self):
+        # 冻结阈值 = 用 10 月阈值重算 11 月标签，等价于直接调用 segment_users(thresholds=...)
+        panel = self._panel()
+        oct_events = panel[panel['month'].eq('2019-10')]
+        nov_events = panel[panel['month'].eq('2019-11')]
+        seg_oct, thr = segment_users(build_features(oct_events, oct_events['event_time'].max()))
+        seg_nov_frozen, _ = segment_users(build_features(nov_events, nov_events['event_time'].max()),
+                                          thresholds=thr)
+        self.assertNotIn('vip_log_friction1_cutoff', thr)
+        self.assertEqual(len(seg_nov_frozen), len(nov_events['user_id'].unique()))
 
 
 if __name__ == '__main__':

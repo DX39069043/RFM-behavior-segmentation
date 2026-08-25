@@ -25,9 +25,8 @@ def compute_engagement_metrics(df: pd.DataFrame) -> pd.DataFrame:
     构建探索度与摩擦指标，指标定义保持业务可解释。
 
     E_Score: 浏览页数、有效停留时长、会话数的对数标准化均值。
-    Friction_0: 加购但未购买的去重商品数（Cart_Products - Purchased_Products，截断≥0），
-                度量“加购了却没买”的购买意图受阻（未购臂首购潜力识别用）。
-    展示列 Friction / Log_Friction：即 Friction_0 / Log_Friction_0（未购/已购通用）。
+    Friction: 加购但未购买的去重商品数（Cart_Products - Purchased_Products，截断≥0），
+              度量“加购了却没买”的购买意图受阻（未购臂首购潜力识别用）。
     已购臂的“高摩擦”不在此定义——它指跨月完全沉默（见 flag_buyer_silence）。
     """
     out = df.copy()
@@ -37,10 +36,8 @@ def compute_engagement_metrics(df: pd.DataFrame) -> pd.DataFrame:
         values = np.log1p(out[col].clip(lower=0)).to_numpy().reshape(-1, 1)
         z.append(StandardScaler().fit_transform(values).ravel())
     out['E_Score'] = np.mean(z, axis=0)
-    out['Friction_0'] = (out['Cart_Products'] - out['Purchased_Products']).clip(lower=0)
-    out['Log_Friction_0'] = np.log1p(out['Friction_0'])
-    out['Friction'] = out['Friction_0']
-    out['Log_Friction'] = out['Log_Friction_0']
+    out['Friction'] = (out['Cart_Products'] - out['Purchased_Products']).clip(lower=0)
+    out['Log_Friction'] = np.log1p(out['Friction'])
     return out
 
 
@@ -96,16 +93,19 @@ def gmm_intersection_threshold(series: pd.Series, random_state: int = RANDOM_STA
     return cut
 
 
-def segment_users(features: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+def segment_users(features: pd.DataFrame, thresholds: dict | None = None) -> tuple[pd.DataFrame, dict]:
     """
     生成基期可解释、互斥的运营人群。
 
     以“是否已购”为首要业务边界：已购用户按价值指数上四分位识别高价值，
     未购用户按行为指标识别首购潜力；每个指标只在语义匹配的人群内计算。
 
-    未购臂：E_Score 与 Friction_0（加购未买）的 GMM 阈值识别高潜力首购。
+    未购臂：E_Score 与 Friction（加购未买）的 GMM 阈值识别高潜力首购。
     已购臂：高价值用户再按 E_Score 细分为深度互动 / 直购；
     “高价值高摩擦用户”（= 跨月完全沉默）由 flag_buyer_silence 结合观察月数据标记。
+
+    参数 thresholds：传入基期拟合的阈值字典则冻结使用（队列迁移分析中
+    保证跨月标签可比），为 None 时当月重新拟合。
     """
     df = features.copy()
     purchased = df['Purchase_Frequency'].gt(0)
@@ -118,26 +118,39 @@ def segment_users(features: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         + np.log1p(buyer['Purchase_Frequency'])
         - np.log1p(buyer['Recency_Days'])
     )
-    value_cut = float(value_index.quantile(0.75))
     df['Value_Index'] = np.nan
     df.loc[purchased, 'Value_Index'] = value_index
     df['Base_Segment'] = np.where(purchased, '已购用户', '未购用户')
 
     nonbuyer_mask = ~purchased
-    nonbuyer_escore_cut = gmm_intersection_threshold(df.loc[nonbuyer_mask, 'E_Score'])
-    nonbuyer_friction0_cut = gmm_intersection_threshold(df.loc[nonbuyer_mask, 'Log_Friction_0'])
-    df['User_Segment'] = '普通浏览用户'
-    df.loc[nonbuyer_mask & (df['E_Score'] >= nonbuyer_escore_cut)
-           & (df['Log_Friction_0'] >= nonbuyer_friction0_cut), 'User_Segment'] = '高潜力首购用户'
+
+    if thresholds is None:
+        # 默认：当月拟合全部阈值
+        value_cut = float(value_index.quantile(0.75))
+        nonbuyer_escore_cut = gmm_intersection_threshold(df.loc[nonbuyer_mask, 'E_Score'])
+        nonbuyer_friction_cut = gmm_intersection_threshold(df.loc[nonbuyer_mask, 'Log_Friction'])
+    else:
+        # 冻结阈值：沿用基期拟合的阈值重算标签（队列迁移分析用，保证跨月标签可比）
+        value_cut = thresholds['vip_value_index_cutoff']
+        nonbuyer_escore_cut = thresholds['nonbuyer_e_score_cutoff']
+        nonbuyer_friction_cut = thresholds['nonbuyer_log_friction_cutoff']
 
     vip_mask = purchased & (df['Value_Index'] >= value_cut)
+    if thresholds is None:
+        vip_escore_cut = gmm_intersection_threshold(df.loc[vip_mask, 'E_Score'])
+    else:
+        vip_escore_cut = thresholds['vip_e_score_cutoff']
+
+    df['User_Segment'] = '普通浏览用户'
+    df.loc[nonbuyer_mask & (df['E_Score'] >= nonbuyer_escore_cut)
+           & (df['Log_Friction'] >= nonbuyer_friction_cut), 'User_Segment'] = '高潜力首购用户'
+
     df.loc[purchased & ~vip_mask, 'User_Segment'] = '常规已购用户'
-    vip_escore_cut = gmm_intersection_threshold(df.loc[vip_mask, 'E_Score'])
     df.loc[vip_mask, 'User_Segment'] = '高价值直购用户'
     df.loc[vip_mask & (df['E_Score'] >= vip_escore_cut), 'User_Segment'] = '高价值深度互动用户'
 
     metadata = {'vip_value_index_cutoff': value_cut, 'nonbuyer_e_score_cutoff': nonbuyer_escore_cut,
-                'nonbuyer_log_friction0_cutoff': nonbuyer_friction0_cut, 'vip_e_score_cutoff': vip_escore_cut}
+                'nonbuyer_log_friction_cutoff': nonbuyer_friction_cut, 'vip_e_score_cutoff': vip_escore_cut}
     return df, metadata
 
 
@@ -193,7 +206,7 @@ def rate_test(nov: pd.DataFrame, treatment_ids: set, control_ids: set, title: st
     if n_a == 0 or n_b == 0:
         # 空组无法计算比率与检验（滚动验证中某月可能没有该人群），返回 NaN
         return {'目标组': title.split('：')[0], '目标人数': n_a, '目标购买率': np.nan,
-                '对照人数': n_b, '对照购买率': np.nan, '风险差': np.nan, 'p值': np.nan}
+                '对照人数': n_b, '对照购买率': np.nan, '购买率差': np.nan, 'p值': np.nan}
     rate_a, rate_b = a / n_a, b / n_b
     table = [[a, n_a - a], [b, n_b - b]]
     try:
@@ -205,9 +218,9 @@ def rate_test(nov: pd.DataFrame, treatment_ids: set, control_ids: set, title: st
     print(f'\n{title}')
     print(f'  目标组: {rate_a:.2%} ({a}/{n_a}), 95% CI [{lo_a:.2%}, {hi_a:.2%}]')
     print(f'  对照组: {rate_b:.2%} ({b}/{n_b}), 95% CI [{lo_b:.2%}, {hi_b:.2%}]')
-    print(f'  风险差: {rate_a-rate_b:+.2%}; 卡方检验 p={pvalue:.3g}')
+    print(f'  购买率差: {rate_a-rate_b:+.2%}; 卡方检验 p={pvalue:.3g}')
     return {'目标组': title.split('：')[0], '目标人数': n_a, '目标购买率': rate_a,
-            '对照人数': n_b, '对照购买率': rate_b, '风险差': rate_a-rate_b, 'p值': pvalue}
+            '对照人数': n_b, '对照购买率': rate_b, '购买率差': rate_a-rate_b, 'p值': pvalue}
 
 
 def export_tracking(segmented: pd.DataFrame, path: Path | None = None) -> pd.DataFrame:
@@ -465,13 +478,27 @@ def score_buyers(segmented: pd.DataFrame, nov: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def load_panel(path: Path | str = PANEL_FILE) -> pd.DataFrame:
-    """读取用户面板（parquet 或 CSV），解析 event_time 并确保 month 列（'YYYY-MM'）存在。"""
+def load_panel(path: Path | str = PANEL_FILE, months: list | None = None) -> pd.DataFrame:
+    """读取用户面板（parquet 或 CSV），解析 event_time 并确保 month 列（'YYYY-MM'）存在。
+
+    months：若指定（如 ['2019-10', '2019-11']），parquet 用行过滤只读这些月份
+    （predicate pushdown，大幅减少 IO）；CSV 则读取后过滤。为 None 时读全量。
+    """
     path = Path(path)
     if path.suffix == '.parquet':
-        panel = pd.read_parquet(path)
+        try:
+            if months is not None:
+                panel = pd.read_parquet(path, filters=[('month', 'in', months)])
+            else:
+                panel = pd.read_parquet(path)
+        except ImportError as exc:
+            raise ImportError(
+                f'读取面板 {path.name} 需要 parquet 引擎（pyarrow）。请先安装依赖：'
+                f'pip install pyarrow  （或 pip install -r requirements.txt）') from exc
     else:
         panel = pd.read_csv(path, parse_dates=['event_time'])
+        if months is not None:
+            panel = panel[panel['event_time'].astype(str).str[:7].isin(months)]
     if 'event_time' in panel.columns:
         panel['event_time'] = pd.to_datetime(panel['event_time'])
     if 'month' not in panel.columns:
@@ -559,3 +586,46 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
             except ValueError as exc:
                 print(f'  [已购臂] {base_m}→{obs_m}→{out_m} 跳过: {exc}')
     return {'验证表': pd.DataFrame(rate_rows), '基准表': pd.DataFrame(auc_rows)}
+
+
+def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None = None) -> pd.DataFrame:
+    """
+    队列迁移分析（标签视角）：固定基期月分层 → 用**冻结的基期阈值**逐月重算
+    同一批用户的标签，回答“10 月标签在后续月份是保持还是转化”。
+
+    阈值只在基期拟合一次，后续月沿用（冻结）——若每月重拟合，阈值漂移会污染
+    标签变化（无法区分“用户变了”还是“尺子变了”）。冻结后跨月标签才可比。
+
+    返回 DataFrame：基期标签 × 月份 × 冻结标签占比（行内归一）。
+    '无任何活动' = 当月完全无任何事件的用户。
+    """
+    if months is None:
+        months = MONTHS
+    base_events = panel[panel['month'].eq(base_month)]
+    if base_events.empty:
+        raise ValueError(f'基期月 {base_month} 没有数据。')
+    feats_base = build_features(base_events, base_events['event_time'].max())
+    base_seg, thresholds = segment_users(feats_base)
+    after = [m for m in months if m > base_month]
+    base_users = base_seg['user_id']
+
+    # 逐月：当月特征 + 冻结的基期阈值 → 重算标签（当月无任何事件的用户记为"无任何活动"）
+    label_parts = []
+    for m in after:
+        ev = panel[panel['month'].eq(m)]
+        if ev.empty:
+            continue
+        feats_m = build_features(ev, ev['event_time'].max())
+        seg_m, _ = segment_users(feats_m, thresholds=thresholds)
+        lab_map = seg_m.set_index('user_id')['User_Segment']
+        tmp = pd.DataFrame({'user_id': base_users.to_numpy(), 'month': m})
+        tmp['frozen_label'] = tmp['user_id'].map(lab_map).fillna('无任何活动')
+        label_parts.append(tmp)
+    fl = pd.concat(label_parts, ignore_index=True)
+    flg = (fl.merge(base_seg[['user_id', 'User_Segment']], on='user_id')
+             .groupby(['User_Segment', 'month', 'frozen_label'], observed=True).size()
+             .rename('n').reset_index())
+    flg['占比'] = flg.groupby(['User_Segment', 'month'], observed=True)['n'].transform(lambda s: s / s.sum())
+    return (flg.pivot_table(index=['User_Segment', 'month'], columns='frozen_label', values='占比')
+                .fillna(0).reset_index()
+                .rename(columns={'User_Segment': '基期标签'}))

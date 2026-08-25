@@ -6,3 +6,4 @@ seaborn==0.13.2
 scikit-learn==1.9.0
 scipy==1.17.1
 openpyxl==3.1.5
+pyarrow==25.0.1   # 读取 data/panel_7months.parquet 需要（parquet 引擎）
