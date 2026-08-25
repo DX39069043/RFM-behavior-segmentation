@@ -16,10 +16,18 @@ build/
 
 # Output / generated files
 tracked_users_list_Nov.csv
+validation_results.csv
+rolling_validation_results.csv
+rolling_baseline_results.csv
+
+# Data files (large) — 不入库，本地保留；生成方式见 sample_user_cohort.py
+data/
+*.parquet
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Data files (large)
-# my_cohort_data_Oct_Nov.csv  # uncomment if you don't want to track data
+# 注：my_cohort_data_Oct_Nov.csv（72.8MB，Notebook 运行依赖）保留入库；
+# 若想改为不入库，取消下一行注释即可。
+# my_cohort_data_Oct_Nov.csv
