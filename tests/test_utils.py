@@ -14,9 +14,9 @@ import numpy as np
 import pandas as pd
 
 from analysis import (build_features, buyer_baseline, cohort_migration,
-                      compute_engagement_metrics, export_tracking, flag_buyer_silence,
-                      gmm_intersection_threshold, load_panel, rate_test, rolling_validation,
-                      score_buyers, score_nonbuyers, segment_users)
+                      compute_engagement_metrics, export_tracking, fit_engagement_scalers,
+                      flag_buyer_silence, gmm_intersection_threshold, load_panel, rate_test,
+                      rolling_validation, score_buyers, score_nonbuyers, segment_users)
 
 
 def make_events(n_users: int = 6) -> pd.DataFrame:
@@ -87,6 +87,38 @@ class TestComputeEngagementMetrics(unittest.TestCase):
         z = [(v - v.mean()) / v.std(ddof=0) for v in vals]
         np.testing.assert_allclose(out['E_Score'], np.mean(z, axis=0), atol=1e-12)
 
+    def test_frozen_scalers_reuse(self):
+        # 冻结标准化器后，同一数据两次计算的 E_Score 应完全一致（冻结路径 = 基期尺子）
+        scalers = fit_engagement_scalers(self.df)
+        out1 = compute_engagement_metrics(self.df)
+        out2 = compute_engagement_metrics(self.df, scalers=scalers)
+        np.testing.assert_allclose(out1['E_Score'], out2['E_Score'], atol=1e-12)
+
+    def test_frozen_scalers_differ_from_refit(self):
+        # 构造两组分布差异大的用户：冻结（基期）标准化与当月重拟合应产生不同 E_Score，
+        # 证明冻结确实改变了行为，且冻结路径 = 用基期 mean/std 手工变换
+        base = pd.DataFrame({
+            'user_id': [1, 2, 3],
+            'Pages_Viewed': [1, 2, 3],
+            'Estimated_Time': [10, 20, 30],
+            'Session_Count': [1, 1, 1],
+            'Purchase_Frequency': [0, 0, 0],
+            'Cart_Products': [0, 0, 0],
+            'Purchased_Products': [0, 0, 0],
+        })
+        new_pop = base.copy()
+        new_pop['Pages_Viewed'] = [100, 200, 300]   # 分布整体平移
+        scalers = fit_engagement_scalers(base)
+        frozen = compute_engagement_metrics(new_pop, scalers=scalers)
+        refit = compute_engagement_metrics(new_pop)
+        self.assertFalse(np.allclose(frozen['E_Score'], refit['E_Score'], atol=1e-6))
+        cols = ['Pages_Viewed', 'Estimated_Time', 'Session_Count']
+        z = []
+        for col in cols:
+            v = np.log1p(new_pop[col].clip(lower=0)).to_numpy()
+            z.append((v - scalers[col].mean_[0]) / scalers[col].scale_[0])
+        np.testing.assert_allclose(frozen['E_Score'], np.mean(z, axis=0), atol=1e-12)
+
 
 class TestBuildFeatures(unittest.TestCase):
     def test_columns_and_counts(self):
@@ -114,6 +146,21 @@ class TestBuildFeatures(unittest.TestCase):
         buyer = feats[feats['user_id'] == 1].iloc[0]
         self.assertEqual(int(buyer['Purchase_Frequency']), 1)   # 重复购买行被去重
         self.assertEqual(int(buyer['Cart_Products']), 1)
+
+    def test_build_features_frozen_scalers(self):
+        # build_features 支持基期取回标准化器（return_scalers=True）、后续月复用（scalers=...），
+        # 且默认调用（不冻结）仍返回单表、行为与旧版一致
+        events = make_events(12)
+        obs_end = events['event_time'].max()
+        feats1, scalers = build_features(events, obs_end, return_scalers=True)
+        self.assertIsInstance(scalers, dict)
+        self.assertEqual(set(scalers), {'Pages_Viewed', 'Estimated_Time', 'Session_Count'})
+        feats2 = build_features(events, obs_end, scalers=scalers)
+        np.testing.assert_allclose(feats1['E_Score'], feats2['E_Score'], atol=1e-12)
+        feats3 = build_features(events, obs_end)
+        self.assertIsInstance(feats3, pd.DataFrame)
+        # 冻结路径与默认（重拟合）对同一数据结果一致（同分布时两种口径等价）
+        np.testing.assert_allclose(feats1['E_Score'], feats3['E_Score'], atol=1e-12)
 
 
 class TestSegmentUsers(unittest.TestCase):

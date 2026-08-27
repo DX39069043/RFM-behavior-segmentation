@@ -14,12 +14,9 @@ build/
 .vscode/
 *.swp
 
-# Output / generated files（可重算，不入库）
-tracked_users_list_Nov.csv
+# Output / generated files（小体积结果入库，保证 clone 后 Notebook 可直接读）
+# 大体积可重算产物不入库：
 validation_results.csv
-rolling_validation_results.csv
-rolling_baseline_results.csv
-cohort_frozen_labels.csv
 
 # Data files (large) — 不入库，本地保留；生成方式见 sample_user_cohort.py
 data/

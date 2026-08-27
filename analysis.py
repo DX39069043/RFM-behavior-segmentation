@@ -20,7 +20,19 @@ from config import (BOOTSTRAP_N, CV_FOLDS, DEDUPE_EVENTS, LR_MAX_ITER,
                     MONTHS, PANEL_FILE, RANDOM_STATE, SESSION_GAP_SECONDS)
 
 
-def compute_engagement_metrics(df: pd.DataFrame) -> pd.DataFrame:
+def fit_engagement_scalers(df: pd.DataFrame) -> dict:
+    """拟合 E_Score 三个分量（log1p 后）的 Z 标准化器，供基期冻结复用。
+
+    队列迁移分析中，若每月对 E_Score 重新标准化，"冻结阈值"就只冻结了
+    阈值数值、没冻结"尺子"本身——同用户跨月 E_Score 不可严格比较。
+    基期拟合一次、后续月 transform 可保证跨月可比。
+    """
+    cols = ['Pages_Viewed', 'Estimated_Time', 'Session_Count']
+    return {col: StandardScaler().fit(np.log1p(df[col].clip(lower=0)).to_numpy().reshape(-1, 1))
+            for col in cols}
+
+
+def compute_engagement_metrics(df: pd.DataFrame, scalers: dict | None = None) -> pd.DataFrame:
     """
     构建探索度与摩擦指标，指标定义保持业务可解释。
 
@@ -28,34 +40,54 @@ def compute_engagement_metrics(df: pd.DataFrame) -> pd.DataFrame:
     Friction: 加购但未购买的去重商品数（Cart_Products - Purchased_Products，截断≥0），
               度量“加购了却没买”的购买意图受阻（未购臂首购潜力识别用）。
     已购臂的“高摩擦”不在此定义——它指跨月完全沉默（见 flag_buyer_silence）。
+
+    scalers：可选 dict（见 fit_engagement_scalers）。为 None 时当月重新拟合
+    （滚动验证等逐月独立建模场景）；传入时用既有标准化器 transform
+    （队列迁移分析冻结 E_Score 的标准化参数，保证跨月可比）。
     """
     out = df.copy()
     cols = ['Pages_Viewed', 'Estimated_Time', 'Session_Count']
     z = []
     for col in cols:
         values = np.log1p(out[col].clip(lower=0)).to_numpy().reshape(-1, 1)
-        z.append(StandardScaler().fit_transform(values).ravel())
+        if scalers is None:
+            z.append(StandardScaler().fit_transform(values).ravel())
+        else:
+            z.append(scalers[col].transform(values).ravel())
     out['E_Score'] = np.mean(z, axis=0)
     out['Friction'] = (out['Cart_Products'] - out['Purchased_Products']).clip(lower=0)
     out['Log_Friction'] = np.log1p(out['Friction'])
     return out
 
 
-def build_features(events: pd.DataFrame, observation_end: pd.Timestamp) -> pd.DataFrame:
-    """按会话计算有效停留时长，聚合为用户特征（含加购/购买的去重商品数）。"""
+def build_features(events: pd.DataFrame, observation_end: pd.Timestamp,
+                   scalers: dict | None = None, return_scalers: bool = False):
+    """按会话计算有效停留时长，聚合为用户特征（含加购/购买的去重商品数）。
+
+    scalers / return_scalers：E_Score 标准化器的冻结复用（队列迁移分析用）。
+    基期调用传 return_scalers=True 取回标准化器，后续月传 scalers=基期标准化器，
+    保证 E_Score 的 Z 标准化参数跨月不变（否则"冻结阈值"只冻结了阈值、
+    没冻结"尺子"本身，跨月标签不可比）。默认（两者均不传）行为与旧版一致：
+    返回单表、每月重新拟合标准化。
+    """
     if DEDUPE_EVENTS:
         events = events.drop_duplicates()
     events = events.sort_values(['user_id', 'user_session', 'event_time']).copy()
     gap = events.groupby(['user_id', 'user_session'])['event_time'].diff().dt.total_seconds()
     events['active_seconds'] = gap.where(gap.between(0, SESSION_GAP_SECONDS), 0).fillna(0)
-    purchases = events.query("event_type == 'purchase'").groupby('user_id').agg(
+    # 布尔掩码一次切分事件类型（避免多次 query 全表扫描）
+    is_purchase = events['event_type'].eq('purchase')
+    is_view = events['event_type'].eq('view')
+    is_cart = events['event_type'].eq('cart')
+    purchase_ev = events.loc[is_purchase]
+    purchases = purchase_ev.groupby('user_id').agg(
         Last_Purchase=('event_time', 'max'), Purchase_Frequency=('event_type', 'size'),
         Total_Spending=('price', 'sum'))
-    views = events.query("event_type == 'view'").groupby('user_id').size().rename('Pages_Viewed')
+    views = events.loc[is_view].groupby('user_id').size().rename('Pages_Viewed')
     sessions = events.groupby('user_id')['user_session'].nunique().rename('Session_Count')
     duration = events.groupby('user_id')['active_seconds'].sum().rename('Estimated_Time')
-    cart_products = events.query("event_type == 'cart'").groupby('user_id')['product_id'].nunique().rename('Cart_Products')
-    purchased_products = events.query("event_type == 'purchase'").groupby('user_id')['product_id'].nunique().rename('Purchased_Products')
+    cart_products = events.loc[is_cart].groupby('user_id')['product_id'].nunique().rename('Cart_Products')
+    purchased_products = purchase_ev.groupby('user_id')['product_id'].nunique().rename('Purchased_Products')
     features = pd.DataFrame(index=events['user_id'].unique())
     features.index.name = 'user_id'
     features = features.join([purchases, views, sessions, duration, cart_products, purchased_products]).reset_index()
@@ -69,7 +101,11 @@ def build_features(events: pd.DataFrame, observation_end: pd.Timestamp) -> pd.Da
     features['Purchased_Products'] = features['Purchased_Products'].astype(int)
     fallback_recency = (observation_end - events['event_time'].min()).days + 1
     features['Recency_Days'] = (observation_end - features['Last_Purchase']).dt.days.fillna(fallback_recency).astype(int)
-    return compute_engagement_metrics(features.drop(columns='Last_Purchase'))
+    feats = features.drop(columns='Last_Purchase')
+    if return_scalers and scalers is None:
+        scalers = fit_engagement_scalers(feats)
+    out = compute_engagement_metrics(feats, scalers=scalers)
+    return (out, scalers) if return_scalers else out
 
 
 def gmm_intersection_threshold(series: pd.Series, random_state: int = RANDOM_STATE) -> float:
@@ -478,25 +514,32 @@ def score_buyers(segmented: pd.DataFrame, nov: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def load_panel(path: Path | str = PANEL_FILE, months: list | None = None) -> pd.DataFrame:
+def load_panel(path: Path | str = PANEL_FILE, months: list | None = None,
+               columns: list | None = None) -> pd.DataFrame:
     """读取用户面板（parquet 或 CSV），解析 event_time 并确保 month 列（'YYYY-MM'）存在。
 
     months：若指定（如 ['2019-10', '2019-11']），parquet 用行过滤只读这些月份
     （predicate pushdown，大幅减少 IO）；CSV 则读取后过滤。为 None 时读全量。
+    columns：若指定（如分析必需列子集），只读这些列，降低 IO 与内存占用
+    （面板 2000 万+ 行，字符串列如 category_code / brand 占用显著）。
     """
     path = Path(path)
     if path.suffix == '.parquet':
         try:
+            kwargs = {}
             if months is not None:
-                panel = pd.read_parquet(path, filters=[('month', 'in', months)])
-            else:
-                panel = pd.read_parquet(path)
+                kwargs['filters'] = [('month', 'in', months)]
+            if columns is not None:
+                kwargs['columns'] = columns
+            panel = pd.read_parquet(path, **kwargs)
         except ImportError as exc:
             raise ImportError(
                 f'读取面板 {path.name} 需要 parquet 引擎（pyarrow）。请先安装依赖：'
                 f'pip install pyarrow  （或 pip install -r requirements.txt）') from exc
     else:
         panel = pd.read_csv(path, parse_dates=['event_time'])
+        if columns is not None:
+            panel = panel[[c for c in columns if c in panel.columns]]
         if months is not None:
             panel = panel[panel['event_time'].astype(str).str[:7].isin(months)]
     if 'event_time' in panel.columns:
@@ -526,12 +569,14 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
     """
     if months is None:
         months = MONTHS
+    # 一次性按月份分片，避免后续每对月份都全表扫描 panel（数据 2000 万+ 行）
+    by_month = {m: g for m, g in panel.groupby('month')}
     rate_rows, auc_rows = [], []
     for t in range(len(months) - 1):
         base_m, obs_m = months[t], months[t + 1]
-        base_events = panel[panel['month'].eq(base_m)]
-        obs_events = panel[panel['month'].eq(obs_m)]
-        if base_events.empty or obs_events.empty:
+        base_events = by_month.get(base_m)
+        obs_events = by_month.get(obs_m)
+        if base_events is None or obs_events is None or base_events.empty or obs_events.empty:
             print(f'跳过 {base_m}→{obs_m}（无数据）')
             continue
         features = build_features(base_events, base_events['event_time'].max())
@@ -560,8 +605,8 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
         # ── 实验二（已购臂·跨月沉默）：基期高价值 → 观察月沉默 → 验证月购买（需第 3 个月）──
         if t + 2 < len(months):
             out_m = months[t + 2]
-            out_events = panel[panel['month'].eq(out_m)]
-            if out_events.empty:
+            out_events = by_month.get(out_m)
+            if out_events is None or out_events.empty:
                 print(f'跳过 {base_m}→{obs_m}→{out_m}（验证月无数据）')
                 continue
             flagged = flag_buyer_silence(segmented, obs_events)
@@ -601,21 +646,26 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
     """
     if months is None:
         months = MONTHS
-    base_events = panel[panel['month'].eq(base_month)]
-    if base_events.empty:
+    # 一次性按月份分片（避免逐月全表扫描），并只保留基期及之后月份
+    by_month = {m: g for m, g in panel.groupby('month')}
+    base_events = by_month.get(base_month)
+    if base_events is None or base_events.empty:
         raise ValueError(f'基期月 {base_month} 没有数据。')
-    feats_base = build_features(base_events, base_events['event_time'].max())
+    # 基期：拟合阈值 + 拟合 E_Score 标准化器（后者冻结给后续月复用，
+    # 否则每月重新标准化会让 E_Score 的"尺子"每月漂移、破坏跨月可比）
+    feats_base, scalers = build_features(base_events, base_events['event_time'].max(),
+                                         return_scalers=True)
     base_seg, thresholds = segment_users(feats_base)
     after = [m for m in months if m > base_month]
     base_users = base_seg['user_id']
 
-    # 逐月：当月特征 + 冻结的基期阈值 → 重算标签（当月无任何事件的用户记为"无任何活动"）
+    # 逐月：当月特征（用基期标准化器）+ 冻结的基期阈值 → 重算标签（当月无任何事件的用户记为"无任何活动"）
     label_parts = []
     for m in after:
-        ev = panel[panel['month'].eq(m)]
-        if ev.empty:
+        ev = by_month.get(m)
+        if ev is None or ev.empty:
             continue
-        feats_m = build_features(ev, ev['event_time'].max())
+        feats_m = build_features(ev, ev['event_time'].max(), scalers=scalers)
         seg_m, _ = segment_users(feats_m, thresholds=thresholds)
         lab_map = seg_m.set_index('user_id')['User_Segment']
         tmp = pd.DataFrame({'user_id': base_users.to_numpy(), 'month': m})

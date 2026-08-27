@@ -2,12 +2,15 @@
 
 产出 rolling_validation_results.csv（两项对照实验）与 rolling_baseline_results.csv（两臂 LR 基准 AUC）。
 """
-from config import OUTPUT_ROLLING, OUTPUT_ROLLING_BASELINE, PANEL_FILE
+from config import MONTHS, OUTPUT_ROLLING, OUTPUT_ROLLING_BASELINE, PANEL_FILE
 from analysis import load_panel, rolling_validation
+
+# 分析只需要这 7 列；category_code / brand 等字符串列不读，省 IO 与内存
+PANEL_COLUMNS = ['event_time', 'event_type', 'price', 'product_id', 'user_id', 'user_session', 'month']
 
 
 def main() -> None:
-    panel = load_panel(PANEL_FILE)
+    panel = load_panel(PANEL_FILE, months=MONTHS, columns=PANEL_COLUMNS)
     print(f'面板: {len(panel):,} 行, {panel["user_id"].nunique():,} 用户')
     res = rolling_validation(panel)
     res['验证表'].to_csv(OUTPUT_ROLLING, index=False, encoding='utf-8-sig')
