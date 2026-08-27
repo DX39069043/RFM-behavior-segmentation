@@ -39,6 +39,8 @@
 | 报告：`数据分析报告.md` / `README.md` / `项目介绍.md` | 文档（全部已收口为当前面板口径） |
 
 > 精简记录（2026-08）：已删除 `kaggle_user_panel_sampling.ipynb`（与 `sample_user_cohort.py` 重复）；Notebook 删除 7 个失效/冗余 cell（偏度叙述、单变量分布图、双月实验二说明、敏感性分析；结构透视 cell 保留）；LR 基准 cell 删除校准曲线/Top-k 图，只保留指标输出；`analysis.py` 删除 `Log_Friction` 冗余别名列。随后从 `project4.0` 移植队列迁移（`cohort_migration` + 冻结阈值），`data/panel_7months.parquet` 已就位；**再按用户要求删除状态迁移表整套内容**（migration/cumulative/revival 及其 CSV 与 Notebook ①②③ 图），队列迁移只保留冻结标签（标签保持/转化）主线；**统一数据源**：删除双月样本 `my_cohort_data_Oct_Nov.csv`，Notebook 全部改用 7 个月面板（10 月建模 / 11 月验证），滚动时间外验证升级为正式验证（模型验证章节第一节），原独立"实验一"cell 删除（其 flag_buyer_silence 逻辑移入汇总报告 cell）；`load_panel` 支持按月过滤（只读 10/11 月，加载从 ~2.5 分钟降至 ~40 秒）；`requirements.txt` 补充 pyarrow。
+>
+> 二次修复记录（2026-08，提交 68b84af / 本次）：① **E_Score 标准化器冻结**（`fit_engagement_scalers` + `build_features` 的 scalers 参数，队列迁移跨月可比）；② 重跑滚动验证/队列迁移产物，**已购臂"规则 AUC"修正为沉默规则负向指标（0.466~0.473）**，结果 CSV 移出 .gitignore 入库，Notebook 加结果文件存在性检查；③ 性能：`rolling_validation`/`cohort_migration` 按 month 预分片、`build_features` 向量化（shift 替代 groupby diff）、`load_panel` columns 列子集化、**队列迁移基期用户下推过滤**（每月仅对基期用户聚合）；④ **Notebook 汇总报告（Cell 24）存活偏差修复**：先存 10 月基期标签 `Base_User_Segment` 再沉默分流，VIP 转化率改按事前基期全量口径（深度互动 45.9% / 直购 36.6%，原 flag 后活跃口径 60.4%/59.1% 为条件概率）；⑤ 测试 18 → 21 用例（新增冻结标准化 3 例）。
 
 ## 五、核心方法（重要约定）
 

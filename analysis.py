@@ -73,8 +73,14 @@ def build_features(events: pd.DataFrame, observation_end: pd.Timestamp,
     if DEDUPE_EVENTS:
         events = events.drop_duplicates()
     events = events.sort_values(['user_id', 'user_session', 'event_time']).copy()
-    gap = events.groupby(['user_id', 'user_session'])['event_time'].diff().dt.total_seconds()
-    events['active_seconds'] = gap.where(gap.between(0, SESSION_GAP_SECONDS), 0).fillna(0)
+    # 向量化计算会话内相邻事件时间差：排序后仅同一 user_id 且同一 user_session 的
+    # 相邻行计入（等价于 groupby(['user_id','user_session']).diff()，但避免维护
+    # 数十万分组对象，每月数百万行下快数倍）
+    same_session = (events['user_id'].eq(events['user_id'].shift())
+                    & events['user_session'].eq(events['user_session'].shift()))
+    time_diff = events['event_time'].diff().dt.total_seconds()
+    events['active_seconds'] = time_diff.where(
+        same_session & time_diff.between(0, SESSION_GAP_SECONDS), 0).fillna(0)
     # 布尔掩码一次切分事件类型（避免多次 query 全表扫描）
     is_purchase = events['event_type'].eq('purchase')
     is_view = events['event_type'].eq('view')
@@ -657,7 +663,7 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
                                          return_scalers=True)
     base_seg, thresholds = segment_users(feats_base)
     after = [m for m in months if m > base_month]
-    base_users = base_seg['user_id']
+    base_user_ids = base_seg['user_id'].to_numpy()
 
     # 逐月：当月特征（用基期标准化器）+ 冻结的基期阈值 → 重算标签（当月无任何事件的用户记为"无任何活动"）
     label_parts = []
@@ -665,10 +671,15 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
         ev = by_month.get(m)
         if ev is None or ev.empty:
             continue
+        # 下推过滤：只保留基期用户，后续各月特征聚合计算量大幅减少。
+        # E_Score 用冻结标准化器、阈值冻结，过滤不改变任何标签判定（语义等价）。
+        ev = ev[ev['user_id'].isin(base_user_ids)]
+        if ev.empty:
+            continue
         feats_m = build_features(ev, ev['event_time'].max(), scalers=scalers)
         seg_m, _ = segment_users(feats_m, thresholds=thresholds)
         lab_map = seg_m.set_index('user_id')['User_Segment']
-        tmp = pd.DataFrame({'user_id': base_users.to_numpy(), 'month': m})
+        tmp = pd.DataFrame({'user_id': base_user_ids, 'month': m})
         tmp['frozen_label'] = tmp['user_id'].map(lab_map).fillna('无任何活动')
         label_parts.append(tmp)
     fl = pd.concat(label_parts, ignore_index=True)
