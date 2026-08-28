@@ -2,7 +2,7 @@
 
 未购用户 → 首购潜力识别（探索度 + 加购未买 + 首购概率分）；
 已购用户 → 价值分层与复购概率分（RFM 特征 + 复购基准）。
-指标构建 → 特征聚合 → GMM 阈值分层 → 时间外验证检验 → 逻辑回归基准 → 概率分 Top-k 圈人 → 名单导出。
+指标构建 → 特征聚合 → GMM 阈值分层 → 时间外验证检验 → 逻辑回归基准 → 概率分 Top-k 选人 → 名单导出。
 数据分析工作流（数据加载、EDA 与可视化）在 main.ipynb 中组织。
 """
 
@@ -471,7 +471,7 @@ def score_nonbuyers(segmented: pd.DataFrame, nov: pd.DataFrame) -> pd.DataFrame:
 
     规则分层（高潜力首购）作为解释与策略层；触达名单按概率分取 Top-k（排序层）。
     TopK_Flag 以“规则人群规模”为同预算基准，标记 rank ≤ k 的未购用户。
-    注：本列为全量拟合的排序分，用于圈人；预期触达效果以 nonbuyer_baseline
+    注：本列为全量拟合的排序分，用于选人；预期触达效果以 nonbuyer_baseline
     的 OOF 评估为准。上线时需用滚动历史窗口训练、未来月验证并定期重校准。
     """
     out = segmented.copy()

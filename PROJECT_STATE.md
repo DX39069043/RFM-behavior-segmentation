@@ -12,7 +12,7 @@
 
 本版本 = git 提交 `fdef422`（"重构：用户价值与购买潜力分层（UserValue&Potential）"）对应的状态 **+ 从旧工作区 `project4.0` 移植的队列迁移功能**：
 
-- ✅ 已包含：跨月沉默流失定义（`flag_buyer_silence`）、滚动时间外验证（实验二为 3 月组）、两套 LR 基准、概率分 Top-k 圈人、**队列迁移分析（`cohort_migration` + `segment_users` 冻结阈值参数）**、Notebook"滚动时间外验证"与"队列迁移分析"章节
+- ✅ 已包含：跨月沉默流失定义（`flag_buyer_silence`）、滚动时间外验证（实验二为 3 月组）、两套 LR 基准、概率分 Top-k 选人、**队列迁移分析（`cohort_migration` + `segment_users` 冻结阈值参数）**、Notebook"滚动时间外验证"与"队列迁移分析"章节
 - ❌ 未包含：马尔可夫状态机、纵向特征进 LR（均未做，用户倾向简化）
 - 旧版本"浏览成本摩擦"（Friction_1）已彻底删除，未购人群 `Friction` 不受影响
 
@@ -26,7 +26,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `main.ipynb` | 分析入口（33 cells）：EDA → 特征 → 分层 → 结构透视 → **滚动验证（正式验证，模型验证章节第一节）** → 汇总 → 未购人群基准 → 概率分圈人 → 名单 → 队列迁移分析（含解读 markdown + 逐月转化去向图） |
+| `main.ipynb` | 分析入口（33 cells）：EDA → 特征 → 分层 → 结构透视 → **滚动验证（正式验证，模型验证章节第一节）** → 汇总 → 未购人群基准 → 概率分选人 → 名单 → 队列迁移分析（含解读 markdown + 逐月转化去向图） |
 | `analysis.py` | 函数库：指标/分层（支持冻结阈值）/跨月沉默/检验/LR 基准/打分/滚动验证/`cohort_migration` |
 | `config.py` | 集中配置（路径、MONTHS、BASE_MONTH、PANEL_FILE、随机种子） |
 | `run_rolling.py` | 滚动验证入口 → 两张 CSV |
