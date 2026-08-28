@@ -63,15 +63,29 @@ import matplotlib.font_manager as fm
 import seaborn as sns
 from IPython.display import display, HTML
 
-# 中文字体设置
+# 中文字体设置：优先常用中文字体；都找不到时自动扫描系统已装字体中任意一个含中文关键词的
 plt.rcParams['axes.unicode_minus'] = False
-for font_name in ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']:
+_cjk_candidates = ['Microsoft YaHei', 'SimHei', 'PingFang SC', 'Noto Sans CJK SC',
+                  'Arial Unicode MS', 'WenQuanYi Micro Hei', 'Source Han Sans SC']
+_chosen = None
+for _name in _cjk_candidates:
     try:
-        fm.findfont(font_name, fallback_to_default=False)
-        plt.rcParams['font.sans-serif'] = [font_name]
+        fm.findfont(_name, fallback_to_default=False)
+        _chosen = _name
         break
-    except:
+    except Exception:
         continue
+if _chosen is None:   # 兜底：扫描已安装字体，取名称含中文关键词的第一个
+    for _f in fm.fontManager.ttflist:
+        if any(_k in _f.name for _k in ('YaHei', 'SimHei', 'Hei', 'CJK', 'PingFang',
+                                        'WenQuanYi', 'Noto Sans CJK', 'Song', 'Kai', 'Ming')):
+            _chosen = _f.name
+            break
+if _chosen:
+    plt.rcParams['font.sans-serif'] = [_chosen]
+    print(f'中文字体: {_chosen}')
+else:
+    print('警告: 未找到中文字体，图表中文可能显示为方块')
 %matplotlib inline
 ```
 
@@ -85,7 +99,7 @@ for font_name in ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']:
 - `seaborn as sns`：基于 matplotlib 的高层统计绘图库，这里用于热力图（`sns.heatmap`）。
 - `from IPython.display import display, HTML`：Notebook 富文本输出。`HTML(...)` 构造 HTML 字符串，`display(...)` 在 cell 下方渲染——本项目用它输出**格式化的 HTML 表格 + 灰色小字"怎么读"说明**。
 - `plt.rcParams['axes.unicode_minus'] = False`：让坐标轴负号显示为普通 ASCII 连字符 `-`。**为什么**：matplotlib 默认用 Unicode 减号，在中文字体下常渲染成方块。
-- 中文字体循环：matplotlib 默认字体（DejaVu Sans）**不含中文字形**，不设置的话图表里所有中文都是豆腐块。这里依次尝试 `SimHei`（黑体）→ `Microsoft YaHei`（微软雅黑）→ `Arial Unicode MS`（Mac 字体），`fm.findfont(font_name, fallback_to_default=False)` 严格检查字体是否真实存在（`fallback_to_default=False` 表示找不到就抛异常而非静默回退），找到第一个存在的就 `plt.rcParams['font.sans-serif'] = [font_name]` 设为全图默认字体并 `break` 跳出。
+- 中文字体设置（后加修复）：matplotlib 默认字体（DejaVu Sans）**不含中文字形**，不设置的话图表里所有中文都是豆腐块。**原写法只尝试 3 个固定字体名**（SimHei / Microsoft YaHei / Arial Unicode MS），如果用户机器装的是别的中文字体（如 Noto/思源/苹方/文泉驿）就会全部失败 → 图表中文变方块。修复后：① 候选列表扩到 7 个常用中文字体；② 仍找不到时**扫描 `fm.fontManager.ttflist`（系统已装字体清单），取名称含中文关键词（YaHei/SimHei/Hei/CJK/PingFang/WenQuanYi/Noto/Song/Kai/Ming）的第一个**——不管装了什么中文字体都能命中；③ 成功时打印所用字体（`print(f'中文字体: ...')`），失败时给出明确警告而不是静默方块。`fm.findfont(name, fallback_to_default=False)` 严格检查字体是否真实存在（`False` 表示找不到就抛异常而非静默回退）。
 - `%matplotlib inline`：Jupyter magic 命令，让 `plt.show()` 的图直接内嵌渲染在 cell 输出里（而不是弹出独立窗口）。
 
 ---
@@ -707,10 +721,14 @@ display(HTML('<p style="color:#555">怎么读：每一行是一次 3 月组验�
 display(HTML(fmt_rates(rates2, ['训练月', '沉默月', '验证月', '目标人数', '目标购买率',
                                 '对照人数', '对照购买率', 'p值']).to_html(index=False)))
 
-# ── 滚动基准表（两套 LR）格式化 + 按臂拆分 ──
+# ── 滚动基准表（两套 LR）格式化 + 按人群拆分 ──
 def fmt_aucs(df, keep_cols):
     out = df.copy()
-    out['结果率'] = out['结果率'].map(fmt_pct)
+    # 基线 / 规则 / LR 三个购买率列（未购人群与已购人群各两列，另一人群的列为 NaN 显示为 —）
+    out['全体未购用户平均首购率'] = out['全体未购用户平均首购率'].map(fmt_pct)
+    out['高潜力首购用户购买率'] = out['高潜力首购用户购买率'].map(fmt_pct)
+    out['全体已购用户平均复购率'] = out['全体已购用户平均复购率'].map(fmt_pct)
+    out['高价值高摩擦用户复购率'] = out['高价值高摩擦用户复购率'].map(fmt_pct)
     out['规则 AUC'] = out['规则 AUC'].map(lambda x: f'{x:.3f}')
     out['LR AUC (OOF)'] = out['LR AUC (OOF)'].map(lambda x: f'{x:.3f}')
     out['LR Top-k 率'] = out['LR Top-k 率'].map(fmt_pct)
@@ -720,18 +738,21 @@ aucs1 = aucs[aucs['人群'].str.contains('未购人群')].copy()
 aucs2 = aucs[aucs['人群'].str.contains('已购人群')].copy()
 
 display(HTML('<h3>②a 基准（未购人群·首购）：规则分层 vs 逻辑回归</h3>'))
-display(HTML('<p style="color:#555">怎么读：AUC 衡量"按分数排序选人"的准确度（0.5=随机，越接近 1 越好）。'
-             '以 10 月未购用户为样本预测次月首购，<b>LR AUC (OOF) 稳定高于规则 AUC</b> ⇒ '
-             '概率分比规则标签更擅长按分数排序选人（规则标签留作解释层）。</p>'))
-display(HTML(fmt_aucs(aucs1, ['训练月', '验证月', '样本', '结果率', '规则人群规模',
-                              '规则 AUC', 'LR AUC (OOF)', 'LR Top-k 率']).to_html(index=False)))
+display(HTML('<p style="color:#555">怎么读：三列对比——<b>全体未购用户平均首购率</b>（什么都不做的基线）、'
+             '<b>高潜力首购用户购买率</b>（手工规则圈出的人）、<b>LR Top-k 率</b>（逻辑回归按分数取前 k 人，'
+             'k = 规则圈出的人数，同预算对比）。同样人数下 LR 的购买率最高 ⇒ 概率分比规则标签更擅长按分数排序选人'
+             '（规则标签留作解释层）；AUC 衡量整体排序准不准（0.5=随机，越接近 1 越好）。</p>'))
+display(HTML(fmt_aucs(aucs1, ['训练月', '验证月', '样本', '全体未购用户平均首购率', '高潜力首购用户购买率',
+                              '规则人群规模', '规则 AUC', 'LR AUC (OOF)', 'LR Top-k 率']).to_html(index=False)))
 
 display(HTML('<h3>②b 基准（已购人群·复购）：规则分层 vs 逻辑回归</h3>'))
-display(HTML('<p style="color:#555">怎么读：以基期已购用户为样本预测验证月复购（规则标记 = 跨月沉默）。'
+display(HTML('<p style="color:#555">怎么读：三列对比——<b>全体已购用户平均复购率</b>（基线）、'
+             '<b>高价值高摩擦用户复购率</b>（跨月沉默规则的复购率，极低 = 流失预警有效）、'
+             '<b>LR Top-k 率</b>（逻辑回归按复购分取前 k 人）。'
              '<b>LR AUC (OOF) 稳定高于规则 AUC</b> ⇒ 复购概率分比沉默规则更擅长按分数排序选人。'
              '注意：沉默规则是"流失识别器"，其复购 AUC 低于 0.5 属正常（负向指标）。</p>'))
-display(HTML(fmt_aucs(aucs2, ['训练月', '沉默月', '验证月', '样本', '结果率', '规则人群规模',
-                              '规则 AUC', 'LR AUC (OOF)', 'LR Top-k 率']).to_html(index=False)))
+display(HTML(fmt_aucs(aucs2, ['训练月', '沉默月', '验证月', '样本', '全体已购用户平均复购率', '高价值高摩擦用户复购率',
+                              '规则人群规模', '规则 AUC', 'LR AUC (OOF)', 'LR Top-k 率']).to_html(index=False)))
 # 拆分展示：实验一（未购人群）与实验二（已购人群·沉默）分开看，避免两类实验混排
 
 # ── 可视化一：购买率对比（实验一 / 实验二 分面柱状图）──
@@ -785,14 +806,14 @@ plt.show()
 
 - **`RECOMPUTE = False` 开关设计**：滚动验证要读全量 7 个月面板（2060 万行）并逐对跑 11 次特征构建+分层+LR，耗时 15-25 分钟。因此结果**默认读取已入库的 CSV**（`rolling_validation_results.csv` / `rolling_baseline_results.csv`，已随仓库提交）；需要重算才把开关改 True。**为什么 CSV 入库**：保证 clone 仓库后 Notebook 不用等 20 分钟就能出结果；CSV 与代码口径一致（由 `run_rolling.py` 生成）。
 - `PANEL_COLUMNS`：只读 7 个分析必需列。原始 parquet 还有 `category_id / category_code / brand` 等字符串列，本项目分析用不到——**列裁剪**把 IO 和内存占用降约 40%。
-- `if RECOMPUTE:` 分支：`rolling_validation(panel)` 返回 `{'验证表': ..., '基准表': ...}`——`验证表` 是实验一/二逐月统计（目标/对照人数、购买率、购买率差、p 值），`基准表` 是两套 LR 指标（样本、结果率、规则人群规模、规则 AUC、LR AUC、LR Top-k 率）。写回 CSV 用 `encoding='utf-8-sig'`（带 BOM，Excel 打开中文不乱码）。
+- `if RECOMPUTE:` 分支：`rolling_validation(panel)` 返回 `{'验证表': ..., '基准表': ...}`——`验证表` 是实验一/二逐月统计（目标/对照人数、购买率、购买率差、p 值），`基准表` 是两套 LR 指标（样本、**全体未购用户平均首购率 / 全体已购用户平均复购率**〔基线〕、**高潜力首购用户购买率 / 高价值高摩擦用户复购率**〔规则圈出的人的实际购买率〕、规则人群规模、规则 AUC、LR AUC、LR Top-k 率）。写回 CSV 用 `encoding='utf-8-sig'`（带 BOM，Excel 打开中文不乱码）。
 - `else:` 分支的文件存在性检查：**这是后加的兜底**——若 CSV 缺失（如旧 clone），直接 `raise SystemExit` 并给出明确指引，而不是 `pd.read_csv` 抛一个让人摸不着头脑的 FileNotFoundError。
 - `fmt_pct(x)`：`—` 表示缺失（NaN），否则 `{:.1%}` 百分比一位小数。`fmt_p(x)`：p 值用科学计数法 `{:.1e}`（p 都是 1e-68 ~ 1e-262 量级，小数显示不下）。
 - `fmt_rates(df, keep_cols)`：把"购买率/对照购买率"转百分比、"p 值"转科学计数，然后只保留 `keep_cols` 列（去掉 `实验`/`目标组` 等冗余列，表格更紧凑）。
 - `rates1 = rates[rates['实验'].str.contains('高潜力首购')]`：按实验名拆出实验一（6 行）和实验二（5 行）。`.str.contains('沉默')` 匹配"高价值高摩擦(沉默)"。
 - `display(HTML('<h3>...'))`：输出 HTML 小标题；`<p style="color:#555">` 灰色小字解释"怎么读"（每张表配一句方法论说明，这是面向评审/面试的贴心设计）。注意 HTML 里 `<` 要写成 `&lt;` 转义（`p&lt;0.05`）。
-- `fmt_aucs`：AUC 列格式化 3 位小数，结果率/LR Top-k 率百分比。
-- `aucs1 / aucs2`：按 `人群` 列拆分未购人群（6 行）和已购人群（5 行）。
+- `fmt_aucs`：三个购买率列（基线 / 规则 / LR Top-k）格式化为百分比，AUC 列 3 位小数；未购人群表里已购人群的列为 NaN → `fmt_pct` 显示为 `—`。
+- `aucs1 / aucs2`：按 `人群` 列拆分未购人群（6 行）和已购人群（5 行）。**为什么基准表有"基线 / 规则 / LR"三列**：基线（全体平均率）是参照系，规则列是"手工规则圈出的人实际购买率"（未购人群 13.30% = 全体基线 5.73% 的 2.3 倍，规则本身很有区分力），LR Top-k 列是"同预算下机器选人的购买率"（16.31%）——三列并排才能看出"规则有用、机器更准"的完整结论（若只有 LR 一列，规则的贡献不可见，容易误读成"规则没用"）。
 - **可视化一（分面双柱图）**：`for ax, g, arm, c_a, c_b in [(axes[0], exp1, ...), (axes[1], exp2, ...)]` 循环画两个子图。`x = np.arange(len(g))` 是每月位置，`w = 0.36` 柱宽；目标组柱在 `x - w/2`、对照组柱在 `x + w/2`（并排双柱）。`ax.bar(x - w/2, g['目标购买率'] * 100, ...)`：购买率是小数（0.133），乘 100 变百分比。柱顶文字标数值。`ax.set_xticklabels(g['验证月'], rotation=45)` 横轴是验证月。**这张图回答"标签有没有区分力"**：柱高差越大越好（实验一目标高、实验二沉默组低）。
 - **可视化二（购买率差趋势）**：`rates.pivot(index='训练月', columns='实验', values='购买率差')` 透视成"行=训练月、列=实验、值=购买率差"，`axhline(0)` 画 0 参考线。**回答"结论跨月稳不稳"**：实验一折线恒在 0 上方（+4.5~+9.3pp）、实验二恒在下方（−19.9~−31.8pp）→ 标签稳健。
 - **可视化三（LR vs 规则 AUC）**：x 轴是每个滚动组合（标签含"训练月→验证月"，已购人群还标"沉默月"）；`axhline(0.5)` 随机水平线。**回答"直接建模 vs 手工规则谁排序更强"**：LR（蓝）稳定高于规则（灰）。

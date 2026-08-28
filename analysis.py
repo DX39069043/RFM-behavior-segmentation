@@ -610,7 +610,8 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
             keys = _ARM_METRICS_KEYS['未购人群(首购)']
             auc_rows.append({
                 '训练月': base_m, '沉默月': '', '验证月': obs_m, '人群': '未购人群(首购)',
-                '样本': m[keys['样本']], '结果率': m[keys['结果率']],
+                '样本': m[keys['样本']], '全体未购用户平均首购率': m[keys['结果率']],
+                '高潜力首购用户购买率': m['规则 Top-k 购买率'],
                 '规则人群规模': m['规则人群规模'], '规则 AUC': m['规则 AUC'],
                 'LR AUC (OOF)': m['LR AUC (5折OOF)'], 'LR Top-k 率': m[keys['topk']],
             })
@@ -639,7 +640,8 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
                 keys = _ARM_METRICS_KEYS['已购人群(复购)']
                 auc_rows.append({
                     '训练月': base_m, '沉默月': obs_m, '验证月': out_m, '人群': '已购人群(复购)',
-                    '样本': m[keys['样本']], '结果率': m[keys['结果率']],
+                    '样本': m[keys['样本']], '全体已购用户平均复购率': m[keys['结果率']],
+                    '高价值高摩擦用户复购率': m['规则 Top-k 复购率'],
                     '规则人群规模': m['规则人群规模'], '规则 AUC': m['规则 AUC'],
                     'LR AUC (OOF)': m['LR AUC (5折OOF)'], 'LR Top-k 率': m[keys['topk']],
                 })
