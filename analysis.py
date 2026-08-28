@@ -38,8 +38,8 @@ def compute_engagement_metrics(df: pd.DataFrame, scalers: dict | None = None) ->
 
     E_Score: 浏览页数、有效停留时长、会话数的对数标准化均值。
     Friction: 加购但未购买的去重商品数（Cart_Products - Purchased_Products，截断≥0），
-              度量“加购了却没买”的购买意图受阻（未购臂首购潜力识别用）。
-    已购臂的“高摩擦”不在此定义——它指跨月完全沉默（见 flag_buyer_silence）。
+              度量“加购了却没买”的购买意图受阻（未购人群首购潜力识别用）。
+    已购人群的“高摩擦”不在此定义——它指跨月完全沉默（见 flag_buyer_silence）。
 
     scalers：可选 dict（见 fit_engagement_scalers）。为 None 时当月重新拟合
     （滚动验证等逐月独立建模场景）；传入时用既有标准化器 transform
@@ -142,8 +142,8 @@ def segment_users(features: pd.DataFrame, thresholds: dict | None = None) -> tup
     以“是否已购”为首要业务边界：已购用户按价值指数上四分位识别高价值，
     未购用户按行为指标识别首购潜力；每个指标只在语义匹配的人群内计算。
 
-    未购臂：E_Score 与 Friction（加购未买）的 GMM 阈值识别高潜力首购。
-    已购臂：高价值用户再按 E_Score 细分为深度互动 / 直购；
+    未购人群：E_Score 与 Friction（加购未买）的 GMM 阈值识别高潜力首购。
+    已购人群：高价值用户再按 E_Score 细分为深度互动 / 直购；
     “高价值高摩擦用户”（= 跨月完全沉默）由 flag_buyer_silence 结合观察月数据标记。
 
     参数 thresholds：传入基期拟合的阈值字典则冻结使用（队列迁移分析中
@@ -198,7 +198,7 @@ def segment_users(features: pd.DataFrame, thresholds: dict | None = None) -> tup
 
 def flag_buyer_silence(segmented: pd.DataFrame, obs_events: pd.DataFrame) -> pd.DataFrame:
     """
-    已购臂“跨月沉默”高摩擦标记（流失判定）。
+    已购人群“跨月沉默”高摩擦标记（流失判定）。
 
     基期的高价值用户（高价值直购 / 深度互动）在观察月完全无任何事件
     （view / cart / purchase 都没有）→ 标记为“高价值高摩擦用户”（= 沉默/流失）。
@@ -566,19 +566,19 @@ def load_panel(path: Path | str = PANEL_FILE, months: list | None = None,
 
 # 各臂基准的指标键名映射（用于滚动验证统一汇总）
 _ARM_METRICS_KEYS = {
-    '未购臂(首购)': {'样本': '样本(未购用户)', '结果率': '11月购买率', 'topk': 'LR Top-k 购买率'},
-    '已购臂(复购)': {'样本': '样本(已购用户)', '结果率': '11月复购率', 'topk': 'LR Top-k 复购率'},
+    '未购人群(首购)': {'样本': '样本(未购用户)', '结果率': '11月购买率', 'topk': 'LR Top-k 购买率'},
+    '已购人群(复购)': {'样本': '样本(已购用户)', '结果率': '11月复购率', 'topk': 'LR Top-k 复购率'},
 }
 
 
 def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
     """
-    滚动时间外验证（已购臂为跨月沉默定义）。
+    滚动时间外验证（已购人群为跨月沉默定义）。
 
-    - 实验一（未购臂）：基期月 t 特征分层 → 观察月 t+1 购买（2 月对）；
-    - 实验二（已购臂）：基期月 t 高价值买家 → 观察月 t+1 完全沉默（高价值高摩擦）
+    - 实验一（未购人群）：基期月 t 特征分层 → 观察月 t+1 购买（2 月对）；
+    - 实验二（已购人群）：基期月 t 高价值买家 → 观察月 t+1 完全沉默（高价值高摩擦）
        → 验证月 t+2 是否购买（3 月组，避免“沉默月=结果月”的循环定义）；
-    - 两臂 LR 基准：未购臂预测 t+1 首购；已购臂以“沉默”为规则标记、预测 t+2 复购。
+    - 两套 LR 基准：未购人群预测 t+1 首购；已购人群以“沉默”为规则标记、预测 t+2 复购。
 
     返回 {'验证表': DataFrame, '基准表': DataFrame}。
     """
@@ -597,27 +597,27 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
         features = build_features(base_events, base_events['event_time'].max())
         segmented, _ = segment_users(features)
 
-        # ── 实验一（未购臂）：基期特征 → 观察月购买 ──
+        # ── 实验一（未购人群）：基期特征 → 观察月购买 ──
         potential = set(segmented.loc[segmented['User_Segment'].eq('高潜力首购用户'), 'user_id'])
         nonbuyer_control = set(segmented.loc[segmented['User_Segment'].eq('普通浏览用户'), 'user_id'])
         res1 = rate_test(obs_events, potential, nonbuyer_control, f'{base_m}→{obs_m} 高潜力首购')
         rate_rows.append({'训练月': base_m, '沉默月': '', '验证月': obs_m, '实验': '高潜力首购', **res1})
 
-        # ── 未购臂 LR 基准 ──
+        # ── 未购人群 LR 基准 ──
         try:
             base = nonbuyer_baseline(segmented, obs_events)
             m = base['metrics']
-            keys = _ARM_METRICS_KEYS['未购臂(首购)']
+            keys = _ARM_METRICS_KEYS['未购人群(首购)']
             auc_rows.append({
-                '训练月': base_m, '沉默月': '', '验证月': obs_m, '臂': '未购臂(首购)',
+                '训练月': base_m, '沉默月': '', '验证月': obs_m, '人群': '未购人群(首购)',
                 '样本': m[keys['样本']], '结果率': m[keys['结果率']],
                 '规则人群规模': m['规则人群规模'], '规则 AUC': m['规则 AUC'],
                 'LR AUC (OOF)': m['LR AUC (5折OOF)'], 'LR Top-k 率': m[keys['topk']],
             })
         except ValueError as exc:
-            print(f'  [未购臂] {base_m}→{obs_m} 跳过: {exc}')
+            print(f'  [未购人群] {base_m}→{obs_m} 跳过: {exc}')
 
-        # ── 实验二（已购臂·跨月沉默）：基期高价值 → 观察月沉默 → 验证月购买（需第 3 个月）──
+        # ── 实验二（已购人群·跨月沉默）：基期高价值 → 观察月沉默 → 验证月购买（需第 3 个月）──
         if t + 2 < len(months):
             out_m = months[t + 2]
             out_events = by_month.get(out_m)
@@ -632,19 +632,19 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
             rate_rows.append({'训练月': base_m, '沉默月': obs_m, '验证月': out_m,
                               '实验': '高价值高摩擦(沉默)', **res2})
 
-            # ── 已购臂 LR 基准：规则标记=沉默，预测验证月复购 ──
+            # ── 已购人群 LR 基准：规则标记=沉默，预测验证月复购 ──
             try:
                 base = buyer_baseline(flagged, out_events)
                 m = base['metrics']
-                keys = _ARM_METRICS_KEYS['已购臂(复购)']
+                keys = _ARM_METRICS_KEYS['已购人群(复购)']
                 auc_rows.append({
-                    '训练月': base_m, '沉默月': obs_m, '验证月': out_m, '臂': '已购臂(复购)',
+                    '训练月': base_m, '沉默月': obs_m, '验证月': out_m, '人群': '已购人群(复购)',
                     '样本': m[keys['样本']], '结果率': m[keys['结果率']],
                     '规则人群规模': m['规则人群规模'], '规则 AUC': m['规则 AUC'],
                     'LR AUC (OOF)': m['LR AUC (5折OOF)'], 'LR Top-k 率': m[keys['topk']],
                 })
             except ValueError as exc:
-                print(f'  [已购臂] {base_m}→{obs_m}→{out_m} 跳过: {exc}')
+                print(f'  [已购人群] {base_m}→{obs_m}→{out_m} 跳过: {exc}')
     return {'验证表': pd.DataFrame(rate_rows), '基准表': pd.DataFrame(auc_rows)}
 
 
