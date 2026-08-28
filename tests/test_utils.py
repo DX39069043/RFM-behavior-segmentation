@@ -274,7 +274,22 @@ class TestExportTracking(unittest.TestCase):
                     'First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag',
                     'Repurchase_Prob', 'Repurchase_Rank']:
             self.assertIn(col, track.columns)
-        self.assertTrue(set(track['User_Segment']) <= {'高潜力首购用户', '高价值高摩擦用户'})
+        # 默认导出全量：所有标签的用户都在名单里
+        self.assertEqual(set(track['User_Segment']), set(seg['User_Segment']))
+        self.assertEqual(len(track), len(seg))
+
+    def test_segments_filter(self):
+        # 传入 segments 时只导出指定标签（候选触达名单 = 高潜力首购 + 高价值高摩擦）
+        events = make_events(10)
+        feats = build_features(events, events['event_time'].max())
+        seg, _ = segment_users(feats)
+        nov = pd.DataFrame({'user_id': [0, 1], 'event_type': ['purchase', 'purchase']})
+        seg = flag_buyer_silence(seg, nov)
+        seg = score_nonbuyers(seg, nov)
+        seg = score_buyers(seg, nov)
+        cand = export_tracking(seg, segments=['高潜力首购用户', '高价值高摩擦用户'])
+        self.assertTrue(set(cand['User_Segment']) <= {'高潜力首购用户', '高价值高摩擦用户'})
+        self.assertLess(len(cand), len(seg))
 
 
 class TestBuyerBaseline(unittest.TestCase):

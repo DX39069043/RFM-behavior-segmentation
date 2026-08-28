@@ -1,4 +1,4 @@
-# 项目状态速览 · UserValue&Potential
+﻿# 项目状态速览 · UserValue&Potential
 
 > 本文档是"上下文接力"用的压缩摘要。新开会话时，让助手先读本文件即可无缝继续。
 > 目录：`D:\Code\RFM_Optimize\old_project\RFM-behavior-segmentation`
@@ -34,8 +34,9 @@
 | `sample_user_cohort.py` | 按用户抽样生成面板 |
 | `rolling_validation_results.csv` / `rolling_baseline_results.csv` | 滚动验证结果（已生成，面板口径） |
 | `cohort_frozen_labels.csv` | 冻结阈值重算的标签占比（已生成） |
-| `tracked_users_list_Nov.csv` | 6,792 名候选名单（10 列，含首购/复购概率分） |
-| `tests/` | 单元测试（12 个测试类 / 21 个用例）：`python -m unittest discover -s tests` |
+| `tracked_users_list_Nov.csv` | 6,792 名候选触达名单（10 列，含首购/复购概率分，入库） |
+| `user_segments_all_Nov.csv` | 全量分层名单（15.1 万用户 × 6 类标签，体积大不入库，Notebook 运行后生成） |
+| `tests/` | 单元测试（12 个测试类 / 22 个用例）：`python -m unittest discover -s tests` |
 | 报告：`数据分析报告.md` / `README.md` / `项目介绍.md` | 文档（全部已收口为当前面板口径） |
 
 > 精简记录（2026-08）：已删除 `kaggle_user_panel_sampling.ipynb`（与 `sample_user_cohort.py` 重复）；Notebook 删除 7 个失效/冗余 cell（偏度叙述、单变量分布图、双月实验二说明、敏感性分析；结构透视 cell 保留）；LR 基准 cell 删除校准曲线/Top-k 图，只保留指标输出；`analysis.py` 删除 `Log_Friction` 冗余别名列。随后从 `project4.0` 移植队列迁移（`cohort_migration` + 冻结阈值），`data/panel_7months.parquet` 已就位；**再按用户要求删除状态迁移表整套内容**（migration/cumulative/revival 及其 CSV 与 Notebook ①②③ 图），队列迁移只保留冻结标签（标签保持/转化）主线；**统一数据源**：删除双月样本 `my_cohort_data_Oct_Nov.csv`，Notebook 全部改用 7 个月面板（10 月建模 / 11 月验证），滚动时间外验证升级为正式验证（模型验证章节第一节），原独立"实验一"cell 删除（其 flag_buyer_silence 逻辑移入汇总报告 cell）；`load_panel` 支持按月过滤（只读 10/11 月，加载从 ~2.5 分钟降至 ~40 秒）；`requirements.txt` 补充 pyarrow。

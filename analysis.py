@@ -265,18 +265,27 @@ def rate_test(nov: pd.DataFrame, treatment_ids: set, control_ids: set, title: st
             '对照人数': n_b, '对照购买率': rate_b, '购买率差': rate_a-rate_b, 'p值': pvalue}
 
 
-def export_tracking(segmented: pd.DataFrame, path: Path | None = None) -> pd.DataFrame:
+def export_tracking(segmented: pd.DataFrame, path: Path | str | None = None,
+                    segments: list | None = None) -> pd.DataFrame:
     """
-    导出候选名单（A/B 抽样框）：高潜力首购 + 高价值高摩擦。
+    导出用户名单（全量分层名单 / A/B 候选抽样框）。
+
+    默认导出**全部用户**的标签与概率分（运营按 User_Segment 筛选差异化策略：
+    高潜力首购→首购激励、高价值高摩擦→流失召回、深度互动→会员运营、
+    常规已购→复购唤醒、直购→快捷复购、普通浏览→潜力池）；
+    传入 segments 时只导出指定标签（如候选触达名单 = 高潜力首购 + 高价值高摩擦）。
 
     排序层：名单附带未购用户首购概率分（First_Purchase_Prob / Rank / TopK_Flag）
     与已购用户复购概率分（Repurchase_Prob / Rank），运营可按预算取 rank ≤ k；
     解释层：保留 User_Segment / E_Score / Friction 供策略话术使用。
     """
-    tracking = segmented.loc[segmented['User_Segment'].isin(['高潜力首购用户', '高价值高摩擦用户']),
-                             ['user_id', 'User_Segment', 'E_Score', 'Friction', 'Value_Index',
-                              'First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag',
-                              'Repurchase_Prob', 'Repurchase_Rank']]
+    cols = ['user_id', 'User_Segment', 'E_Score', 'Friction', 'Value_Index',
+            'First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag',
+            'Repurchase_Prob', 'Repurchase_Rank']
+    if segments is None:
+        tracking = segmented.loc[:, cols].copy()
+    else:
+        tracking = segmented.loc[segmented['User_Segment'].isin(segments), cols]
     if path is not None:
         tracking.to_csv(path, index=False, encoding='utf-8-sig')
     return tracking

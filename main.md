@@ -386,6 +386,8 @@ print(f'未购用户占比: {(df["Purchase_Frequency"]==0).mean():.1%} | 消费�
 > 3. **已购臂"高摩擦"= 跨月完全沉默** — 基期高价值买家在观察月无任何行为（view / cart / purchase 都没有，即完全没来），由 `flag_buyer_silence` 标记，用于流失判定
 >
 > 由 analysis.compute_engagement_metrics 提供
+>
+> 注：E_Score / Friction 在 Cell 04 的 `build_features` 中已随特征一并计算完成（`compute_engagement_metrics` 是其收尾步骤）——因为 `build_features` 返回的是完整的用户特征表（单一事实来源，滚动验证 / run 脚本 / 测试共用同一份逻辑）。本节只解释这三个指标的业务定义，不重复实现计算；下方仅预览这两列的结果。
 
 **要点**：前两个指标在 `analysis.py` 的 `compute_engagement_metrics` 里计算；第三个（沉默）是"跨月行为"判定，不在同一个月内计算，由 `flag_buyer_silence` 结合观察月数据标记。注意"高摩擦"这个词在**未购臂**（加购未买）和**已购臂**（跨月沉默）里含义完全不同。
 
@@ -394,11 +396,12 @@ print(f'未购用户占比: {(df["Purchase_Frequency"]==0).mean():.1%} | 消费�
 **Cell 17（代码）** —— 验证特征列存在：
 
 ```python
-# 特征构建与分层指标统一由 analysis.py 提供（单一事实来源）
+# E_Score / Friction 已在 Cell 04 的 build_features 中随特征一并计算（单一事实来源），此处仅预览结果；
+# 本节（定义指标）负责解释业务含义，不重复实现计算逻辑
 df[['user_id', 'E_Score', 'Friction']].head()
 ```
 
-**解释**：只预览 `df` 的三列。前面 Cell 04 的 `build_features` 已经算好了 `E_Score` / `Friction`，这里只是确认列存在、看一眼量级。**为什么专门放一个 cell**：向读者明确"指标定义不在这里、在 analysis.py"——设计上的单一事实来源原则。
+**解释**：只预览 `df` 的三列。前面 Cell 04 的 `build_features` 已经算好了 `E_Score` / `Friction`，这里只是确认列存在、看一眼量级。**为什么专门放一个 cell**：向读者明确"指标定义不在这里、在 analysis.py"——设计上的单一事实来源原则（这也是为什么数据流上指标提前到 Cell 04 算好、而"定义指标"章节只做解释和预览：`build_features` 返回完整特征表是所有下游共用的约定，拆开反而破坏单一事实来源）。
 
 ---
 
@@ -991,23 +994,31 @@ print('TopK_Flag=1 的未购用户数:', int(final_df['TopK_Flag'].sum()))
 
 ---
 
-**Cell 34（代码）** —— 导出运营名单：
+**Cell 34（代码）** —— 导出运营名单（全量分层名单 + 候选触达名单）：
 
 ```python
 from analysis import export_tracking
 
-tracking = export_tracking(final_df, 'tracked_users_list_Nov.csv')
-print(f"已导出 {len(tracking):,} 名候选用户（高潜力首购 + 高价值高摩擦）至 tracked_users_list_Nov.csv")
+# 1) 全量分层名单：全部 6 类人群（运营按 User_Segment 筛选差异化策略：
+#    高潜力首购→首购激励 / 高价值高摩擦→流失召回 / 深度互动→会员运营 /
+#    常规已购→复购唤醒 / 直购→快捷复购 / 普通浏览→潜力池）
+tracking_all = export_tracking(final_df, 'user_segments_all_Nov.csv')
+print(f"已导出全量分层名单 {len(tracking_all):,} 名用户至 user_segments_all_Nov.csv")
+
+# 2) 候选触达名单（A/B 抽样框）：高潜力首购 + 高价值高摩擦两类人
+tracking_cand = export_tracking(final_df, 'tracked_users_list_Nov.csv',
+                               segments=['高潜力首购用户', '高价值高摩擦用户'])
+print(f"已导出候选触达名单 {len(tracking_cand):,} 名用户（高潜力首购 + 高价值高摩擦）至 tracked_users_list_Nov.csv")
 ```
 
 **逐行/逐对象解释**：
 
-- `export_tracking(final_df, 'tracked_users_list_Nov.csv')`（analysis.py）：
-  - 筛选 `User_Segment ∈ {高潜力首购用户, 高价值高摩擦用户}`（= 未购臂要触达 + 已购臂要召回的两类人）；
+- `export_tracking(final_df, path)` / `export_tracking(final_df, path, segments=...)`（analysis.py）：
+  - **默认（segments=None）导出全部用户**（约 15.1 万，6 类标签都在）——全量分层名单 `user_segments_all_Nov.csv`（体积较大，不入库、可重算）；运营按 `User_Segment` 列筛选各人群，每类人群对应不同运营策略；
+  - **传 segments 时只导出指定标签**——候选触达名单 `tracked_users_list_Nov.csv`（`['高潜力首购用户', '高价值高摩擦用户']` = 未购臂要触达 + 已购臂要召回的两类人，6,792 = 5,408 + 1,384，作为 A/B 抽样框入库）；
   - 保留 10 列：`user_id, User_Segment, E_Score, Friction, Value_Index, First_Purchase_Prob, First_Purchase_Rank, TopK_Flag, Repurchase_Prob, Repurchase_Rank`——**排序层（概率分/排名） + 解释层（标签/指标）双齐全**；
   - `to_csv(..., encoding='utf-8-sig')` 带 BOM，Excel 直接打开不乱码。
-- 名单规模 6,792 = 5,408（高潜力首购）+ 1,384（沉默高价值）。
-- **用途**：这份名单是后续随机 A/B 触达实验的**抽样框**——运营按预算取 `rank ≤ 预算` 即可圈人。⚠️ 注意名单的 `First_Purchase_Prob` 用了 11 月结果拟合（全量拟合，非 OOF），若用于 11 月当月触达存在泄漏；评估预期效果应以 Cell 30/22 的 OOF 指标为准，上线需滚动窗口重训重校准。
+- **用途**：全量名单供各人群差异化运营（按标签选策略）；候选名单是后续随机 A/B 触达实验的**抽样框**——运营按预算取 `rank ≤ 预算` 即可圈人。⚠️ 注意名单的 `First_Purchase_Prob` 用了 11 月结果拟合（全量拟合，非 OOF），若用于 11 月当月触达存在泄漏；评估预期效果应以 OOF 指标为准，上线需滚动窗口重训重校准。
 
 ---
 

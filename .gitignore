@@ -17,6 +17,8 @@ build/
 # Output / generated files（小体积结果入库，保证 clone 后 Notebook 可直接读）
 # 大体积可重算产物不入库：
 validation_results.csv
+# 全量分层名单（约 15 万行，体积大；候选名单 tracked_users_list_Nov.csv 入库）
+user_segments_all_Nov.csv
 
 # Data files (large) — 不入库，本地保留；生成方式见 sample_user_cohort.py
 data/
