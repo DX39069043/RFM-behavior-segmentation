@@ -17,7 +17,8 @@ from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
 from config import (BOOTSTRAP_N, CV_FOLDS, DEDUPE_EVENTS, LR_MAX_ITER,
-                    MONTHS, PANEL_FILE, RANDOM_STATE, SESSION_GAP_SECONDS)
+                    MONTHS, PANEL_FILE, POOL_SEGMENTS, POOL_TOP_RATIO,
+                    RANDOM_STATE, SESSION_GAP_SECONDS)
 
 
 def fit_engagement_scalers(df: pd.DataFrame) -> dict:
@@ -464,16 +465,25 @@ def buyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
     return {'metrics': metrics, 'preds': preds}
 
 
-def score_nonbuyers(segmented: pd.DataFrame, nov: pd.DataFrame) -> pd.DataFrame:
+def score_nonbuyers(segmented: pd.DataFrame, nov: pd.DataFrame,
+                    pool_segments: list | None = None,
+                    top_ratio: float | None = None) -> pd.DataFrame:
     """
     对未购用户全量拟合并输出连续首购概率分（排序层），
     返回带 First_Purchase_Prob / First_Purchase_Rank / TopK_Flag 的副本。
 
-    规则分层（高潜力首购）作为解释与策略层；触达名单按概率分取 Top-k（排序层）。
-    TopK_Flag 以“规则人群规模”为同预算基准，标记 rank ≤ k 的未购用户。
+    规则圈池 + LR 池内排序：候选池 = 规则认可的人群（默认 POOL_SEGMENTS，
+    未购人群里即"高潜力首购用户"，低意向的"普通浏览用户"不入池）；
+    LR 概率分只在池内排名，TopK_Flag 标记池内前 top_ratio（默认 50%）的人优先触达
+    ——k = ceil(池内人数 × top_ratio)，不再是"目标群体的总人数"。
+    非池用户保留概率分（供查看），但 Rank / TopK_Flag 为 NaN。
     注：本列为全量拟合的排序分，用于选人；预期触达效果以 nonbuyer_baseline
     的 OOF 评估为准。上线时需用滚动历史窗口训练、未来月验证并定期重校准。
     """
+    if pool_segments is None:
+        pool_segments = POOL_SEGMENTS
+    if top_ratio is None:
+        top_ratio = POOL_TOP_RATIO
     out = segmented.copy()
     nb_mask = out['Purchase_Frequency'].eq(0)
     nb = out.loc[nb_mask]
@@ -491,23 +501,31 @@ def score_nonbuyers(segmented: pd.DataFrame, nov: pd.DataFrame) -> pd.DataFrame:
     out['First_Purchase_Rank'] = np.nan
     out['TopK_Flag'] = np.nan
     out.loc[nb_mask, 'First_Purchase_Prob'] = proba
-    out.loc[nb_mask, 'First_Purchase_Rank'] = (
-        pd.Series(proba, index=nb.index).rank(ascending=False, method='min').to_numpy())
-    k = int((out['User_Segment'] == '高潜力首购用户').sum())
-    out.loc[nb_mask, 'TopK_Flag'] = (out.loc[nb_mask, 'First_Purchase_Rank'] <= k).astype(int)
+    # 只在候选池内排序：池 = 未购用户中规则认可的人群
+    pool_mask = nb_mask & out['User_Segment'].isin(pool_segments)
+    pool_idx = out.loc[pool_mask].index
+    if len(pool_idx) > 0:
+        ranks = pd.Series(proba, index=nb.index).loc[pool_idx].rank(ascending=False, method='min')
+        k = int(np.ceil(len(pool_idx) * top_ratio))
+        out.loc[pool_idx, 'First_Purchase_Rank'] = ranks
+        out.loc[pool_idx, 'TopK_Flag'] = (ranks <= k).astype(int)
     return out
 
 
-def score_buyers(segmented: pd.DataFrame, nov: pd.DataFrame) -> pd.DataFrame:
+def score_buyers(segmented: pd.DataFrame, nov: pd.DataFrame,
+                 pool_segments: list | None = None) -> pd.DataFrame:
     """
     对已购用户全量拟合并输出连续复购概率分（排序层），
     返回带 Repurchase_Prob / Repurchase_Rank 的副本（未购用户为 NaN）。
 
-    与 score_nonbuyers 对应：为已购人群提供复购概率，供触达排序（Top-k）
-    或流失预警（Bottom-k）按预算取用。注：本列为全量拟合的排序分；
-    预期效果以 buyer_baseline 的 OOF 评估为准。上线时需用滚动历史窗口
-    训练、未来月验证并定期重校准。
+    与 score_nonbuyers 对应：规则圈池 + LR 池内排序——复购排名只在
+    候选池内计算（默认 POOL_SEGMENTS，即规则认可的人群，供触达排序
+    Top-k / 流失预警 Bottom-k 按预算取用）；非池用户保留概率分但 Rank 为 NaN。
+    注：本列为全量拟合的排序分；预期效果以 buyer_baseline 的 OOF 评估为准。
+    上线时需用滚动历史窗口训练、未来月验证并定期重校准。
     """
+    if pool_segments is None:
+        pool_segments = POOL_SEGMENTS
     out = segmented.copy()
     buyer_mask = out['Purchase_Frequency'].gt(0)
     buyer = out.loc[buyer_mask]
@@ -524,8 +542,12 @@ def score_buyers(segmented: pd.DataFrame, nov: pd.DataFrame) -> pd.DataFrame:
     out['Repurchase_Prob'] = np.nan
     out['Repurchase_Rank'] = np.nan
     out.loc[buyer_mask, 'Repurchase_Prob'] = proba
-    out.loc[buyer_mask, 'Repurchase_Rank'] = (
-        pd.Series(proba, index=buyer.index).rank(ascending=False, method='min').to_numpy())
+    # 只在候选池内排序：池 = 已购用户中规则认可的人群
+    pool_mask = buyer_mask & out['User_Segment'].isin(pool_segments)
+    pool_idx = out.loc[pool_mask].index
+    if len(pool_idx) > 0:
+        ranks = pd.Series(proba, index=buyer.index).loc[pool_idx].rank(ascending=False, method='min')
+        out.loc[pool_idx, 'Repurchase_Rank'] = ranks
     return out
 
 

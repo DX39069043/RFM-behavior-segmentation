@@ -221,13 +221,23 @@ class TestScoreNonbuyers(unittest.TestCase):
         out = score_nonbuyers(seg, nov)
         for col in ['First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag']:
             self.assertIn(col, out.columns)
-        self.assertEqual(int(out['TopK_Flag'].sum()),
-                         int((out['User_Segment'] == '高潜力首购用户').sum()))
-        nb = out[out['Purchase_Frequency'].eq(0)]
-        ranks = nb['First_Purchase_Rank'].dropna().to_numpy()
+        # 规则圈池 + LR 池内排序：TopK_Flag 标记池内前 50%（k = ceil(池内人数 × 0.5)）
+        pool_n = int((out['User_Segment'] == '高潜力首购用户').sum())   # 未购候选池 = 高潜力首购
+        self.assertGreater(pool_n, 0)
+        expected_k = int(np.ceil(pool_n * 0.5))
+        # 至少标记 k 人（并列 rank 时可能略多于 k，如小样本合成数据概率相同），且不超过池内总人数
+        self.assertGreaterEqual(int(out['TopK_Flag'].sum()), expected_k)
+        self.assertLessEqual(int(out['TopK_Flag'].sum()), pool_n)
+        # 池内排名从 1 开始、不超过池内人数
+        ranks = out.loc[out['User_Segment'] == '高潜力首购用户', 'First_Purchase_Rank'].dropna().to_numpy()
         self.assertEqual(ranks.min(), 1)                     # min-rank：并列取同 rank
-        self.assertLessEqual(ranks.max(), len(ranks))        # 末尾并列时 max 可 < n
+        self.assertLessEqual(ranks.max(), pool_n)
         self.assertTrue(np.allclose(ranks, ranks.astype(int)))
+        # 不在池内的用户（普通浏览）Rank / TopK_Flag 为 NaN，但概率分仍给出
+        browse = out[out['User_Segment'] == '普通浏览用户']
+        self.assertTrue(browse['First_Purchase_Rank'].isna().all())
+        self.assertTrue(browse['TopK_Flag'].isna().all())
+        self.assertFalse(browse['First_Purchase_Prob'].isna().all())
 
 
 class TestScoreBuyers(unittest.TestCase):

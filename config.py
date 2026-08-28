@@ -30,3 +30,10 @@ RANDOM_STATE = 42         # 全局随机种子（GMM / 交叉验证 / bootstrap 
 LR_MAX_ITER = 2000
 CV_FOLDS = 5              # logistic_baseline 交叉验证折数
 BOOTSTRAP_N = 200         # AUC 差异 bootstrap 次数
+
+# ── 触达名单：规则圈池 + LR 池内排序 ──
+# 候选池 = 规则认可、值得运营的人群（排除低意向的"普通浏览用户"）；
+# LR 概率分只在池内排序，取前 POOL_TOP_RATIO 比例的人优先触达。
+POOL_SEGMENTS = ['高潜力首购用户', '常规已购用户', '高价值直购用户',
+                 '高价值深度互动用户', '高价值高摩擦用户']
+POOL_TOP_RATIO = 0.5      # 池内按概率分取前多少比例（k = ceil(池内人数 × 比例)，默认 50%）

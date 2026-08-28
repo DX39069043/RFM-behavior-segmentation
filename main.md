@@ -962,7 +962,7 @@ print(pd.Series(m['coefficients']).round(4).to_string())
 >   - 未购用户 → 首购概率分 `First_Purchase_Prob`（Top-k 触达）；
 >   - 已购用户 → 复购概率分 `Repurchase_Prob`（Top-k 复购运营，Bottom-k〔分数最低的后 k 人，流失风险最高〕流失预警）；
 > - **解释层（怎么触达）**：保留 E_Score / Friction 分群与策略话术（购物车挽回 / 首购券 / 体验排障）；
-> - 名单同时输出概率分与分群标签；`TopK_Flag` 标记"同预算（= 规则人群规模）下未购用户应触达的前 k 人"。
+> - 名单同时输出概率分与分群标签；**规则圈池 + LR 池内排序**：候选池 = 规则认可、值得运营的人群（排除低意向的"普通浏览"），LR 概率分只在池内排名，`TopK_Flag` 标记池内应优先触达的前 50% 人（k = ceil(池内人数 × 50%)，比例在 config.POOL_TOP_RATIO 可调；选出来的都是规则认可的人，话术讲得清）。
 
 **两层架构的动机**：规则标签解释性强（能讲人话：加购未买 + 高探索 → 购物车挽回话术），但个体排序弱（AUC 0.53）；LR 概率分排序强（AUC 0.67）但不好解释。所以**选人用概率分（排序层），话术用标签（解释层）**——这是本项目"规则 + 模型"双层的核心设计。
 
@@ -973,13 +973,17 @@ print(pd.Series(m['coefficients']).round(4).to_string())
 ```python
 # 概率分 Top-k 选人（排序层）：未购 → 首购分，已购 → 复购分
 from analysis import score_buyers, score_nonbuyers
+from config import POOL_TOP_RATIO
 
 final_df = score_nonbuyers(final_df, df_nov)
 final_df = score_buyers(final_df, df_nov)
 k_rule = int((final_df['User_Segment'] == '高潜力首购用户').sum())
 m = bl['metrics']
 print(f"同预算 k={k_rule}：规则 Top-k 购买率 {m['规则 Top-k 购买率']:.2%} → LR Top-k {m['LR Top-k 购买率']:.2%}（OOF 评估）")
-print('名单新增列：未购用户 First_Purchase_Prob / First_Purchase_Rank / TopK_Flag；已购用户 Repurchase_Prob / Repurchase_Rank\n')
+print('名单新增列：未购用户 First_Purchase_Prob / First_Purchase_Rank / TopK_Flag；已购用户 Repurchase_Prob / Repurchase_Rank')
+print(f"规则圈池 + LR 池内排序：候选池（高潜力首购）{k_rule:,} 人 → TopK_Flag 标记池内前 {POOL_TOP_RATIO:.0%} "
+      f"（{int((final_df['TopK_Flag'] == 1).sum()):,} 人；比例在 config.POOL_TOP_RATIO 调整，\n"
+      f" 选出来的都是规则认可的人，话术讲得清）")
 
 # 未购人群按首购分排序的前 10 名预览
 top_preview = (final_df.loc[final_df['User_Segment'] == '高潜力首购用户',
@@ -999,13 +1003,13 @@ print('TopK_Flag=1 的未购用户数:', int(final_df['TopK_Flag'].sum()))
 
 **逐行/逐对象解释**：
 
-- `score_nonbuyers(final_df, df_nov)`（analysis.py）：对未购用户全量拟合 LR（特征同上）→ 加 3 列：`First_Purchase_Prob`（首购概率）、`First_Purchase_Rank`（概率降序排名，`rank(method='min')` 并列同 rank）、`TopK_Flag`（rank ≤ k 置 1，k = 规则人群规模 5408）。已购用户这三列保持 NaN。
-- `score_buyers(final_df, df_nov)`：对已购用户（`Purchase_Frequency > 0`）拟合复购 LR（7 维 RFM+行为特征）→ 加 `Repurchase_Prob` / `Repurchase_Rank`。未购用户保持 NaN。
-- `k_rule = int((final_df['User_Segment'] == '高潜力首购用户').sum())`：规则人群规模（5408）作为"同预算"基准——**触达预算按规则圈出的人数算，再让 LR 用同样的钱选人**，比较才公平。
+- `score_nonbuyers(final_df, df_nov)`（analysis.py）：对未购用户全量拟合 LR（特征同上）→ 加 3 列：`First_Purchase_Prob`（首购概率，全量未购都有）、`First_Purchase_Rank`（**只在候选池内**按概率降序排名，`rank(method='min')` 并列同 rank）、`TopK_Flag`（**池内** rank ≤ k 置 1，k = ceil(池内人数 × POOL_TOP_RATIO)，默认池内前 50% = 2,704 人）。不在池内的用户（普通浏览）概率分保留、Rank/Flag 为 NaN。
+- `score_buyers(final_df, df_nov)`：对已购用户拟合复购 LR（7 维 RFM+行为特征）→ 加 `Repurchase_Prob` / `Repurchase_Rank`；排名同样只在候选池内（默认 POOL_SEGMENTS = 常规已购 + 直购 + 深度互动 + 高价值高摩擦，共 17,520 人）。未购用户保持 NaN。
+- `k_rule = int((final_df['User_Segment'] == '高潜力首购用户').sum())`：规则人群规模（5408）。注意它现在只用于 **LR 基准实验的同预算对比**（规则 Top-k vs LR Top-k 都取 5408，比较才公平）；**触达名单的 k 改用池内比例**（TopK_Flag = 池内前 50% = 2,704），两个 k 用途不同。
 - `m = bl['metrics']`：复用 Cell 30 的 OOF 指标。打印"规则 Top-k 13.30% → LR Top-k 16.31%"——**这就是"概率分比规则选人更强"的一行证据**。
 - `top_preview`：高潜力首购人群内按首购分排名取前 10（列：user_id / E_Score / Friction / 概率分 / 排名 / TopK_Flag）。注意**此时 `User_Segment` 仍是 flag 后的标签**（高潜力首购不受 flag 影响）。
 - `vip_preview`：高价值高摩擦（= 11 月完全沉默的 VIP）人群按**复购分**排序取前 10。**为什么看复购分**：复购概率越低流失风险越高，`Repurchase_Rank` 最小的其实是复购分最高的人——这里取 `sort_values('Repurchase_Rank').head(10)` 展示的是"复购分最高"的沉默 VIP（最值得优先召回挽回的）。运营上也可取 rank 最大的（Bottom-k，流失最严重）。
-- `int(final_df['TopK_Flag'].sum())`：核对 TopK_Flag=1 的人数应等于 5408。
+- `int(final_df['TopK_Flag'].sum())`：核对 TopK_Flag=1 的人数 = 池内前 50%（2,704），不再是规则总人数（5,408）——k 是一个比例参数，可在 config.POOL_TOP_RATIO 调整（0.3 就取池内前 30%）。
 
 ---
 
