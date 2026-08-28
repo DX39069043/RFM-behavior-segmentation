@@ -337,25 +337,30 @@ print('· 结论：本项目下游（GMM 找切分点 / LR 排序 / 分位数）
 
 ---
 
-**Cell 14（代码）** —— 相关热力图 + 关键相关系数：
+**Cell 14（代码）** —— 相关热力图 + 关键相关系数（已补全会话数）：
 
 ```python
-# 3a. 相关性热力图
-plt.figure(figsize=(8, 7))
-corr = df[target_numeric].corr(method='spearman')
+# 3a. 相关性热力图（7 个数值特征：target_numeric + 会话数，补全浏览三指标两两相关）
+corr_cols = target_numeric + ['Session_Count']   # 会话数与页数/时长同为"探索深度"，相关矩阵需包含它
+plt.figure(figsize=(9, 8))
+corr = df[corr_cols].corr(method='spearman')
 mask = np.triu(np.ones_like(corr, dtype=bool))
 sns.heatmap(corr, mask=mask, annot=True, fmt='.2f', cmap='RdBu_r',
-            center=0, square=True, linewidths=0.8, annot_kws={'fontsize': 9})
-plt.title('Spearman 相关矩阵', fontsize=14, fontweight='bold', pad=15)
+            center=0, square=True, linewidths=0.8, annot_kws={'fontsize': 8})
+plt.title('Spearman 相关矩阵（含会话数）', fontsize=14, fontweight='bold', pad=15)
 plt.tight_layout()
 plt.show()
 
 # ── 关键相关系数（支撑指标构建，供解读引用）──
 import numpy as np
 _ln = lambda s: np.log1p(df[s].clip(lower=0))
-print(f'浏览三指标相关（log1p）: 页数↔时长 r={_ln("Pages_Viewed").corr(_ln("Estimated_Time")):.3f} | '
+print(f'浏览三指标相关（log1p 后 Pearson，指标构建同口径）: 页数↔时长 r={_ln("Pages_Viewed").corr(_ln("Estimated_Time")):.3f} | '
       f'页数↔会话 r={_ln("Pages_Viewed").corr(_ln("Session_Count")):.3f} | '
       f'时长↔会话 r={_ln("Estimated_Time").corr(_ln("Session_Count")):.3f}')
+print(f'同三指标（Spearman，即热力图格子里的数值，与 log1p-Pearson 相近但口径不同）: '
+      f'页数↔时长 r={df["Pages_Viewed"].corr(df["Estimated_Time"], method="spearman"):.3f} | '
+      f'页数↔会话 r={df["Pages_Viewed"].corr(df["Session_Count"], method="spearman"):.3f} | '
+      f'时长↔会话 r={df["Estimated_Time"].corr(df["Session_Count"], method="spearman"):.3f}')
 print(f'加购 vs 浏览（log1p）: r={_ln("Cart_Products").corr(_ln("Pages_Viewed")):.3f} → Friction 是与浏览独立的意图维度')
 print(f'未购用户占比: {(df["Purchase_Frequency"]==0).mean():.1%} | 消费偏度 {df["Total_Spending"].skew():.1f} | '
       f'频次偏度 {df["Purchase_Frequency"].skew():.1f}')
@@ -363,19 +368,20 @@ print(f'未购用户占比: {(df["Purchase_Frequency"]==0).mean():.1%} | 消费�
 
 **逐行/逐对象解释**：
 
+- `corr_cols = target_numeric + ['Session_Count']`：在 Cell 07 的 6 个数值列上**补上会话数**。**为什么必须补**：浏览三指标（页数 / 时长 / 会话）是相关分析的核心对象（它们高度相关 → 合成 E_Score），原热力图漏了 `Session_Count`，导致"页数↔会话、时长↔会话"两对格子缺失、只能靠 print 文字看到。补上后 7×7 矩阵中三对浏览指标两两相关全部可见（Spearman：页数↔时长 0.925、页数↔会话 0.782、时长↔会话 0.643）。
 - `corr(method='spearman')`：计算 Spearman **秩相关**。**为什么不用默认的 Pearson**：Pearson 对线性关系敏感且易被极端值主导（消费偏度 50，几个大额用户就能把相关系数拉向 1）；Spearman 把数值转成排序再算相关，对长尾/单调非线性稳健。这里的长尾数据用 Spearman 更可靠。
 - `mask = np.triu(np.ones_like(corr, dtype=bool))`：构造上三角全 True 的掩码矩阵。`sns.heatmap(mask=mask, ...)` 隐藏上三角。**为什么**：相关矩阵是对称的（r(i,j)=r(j,i)），只显示下三角避免信息重复、图更清爽。
-- `sns.heatmap(...)` 参数：`annot=True` 在格子里写数值；`fmt='.2f'` 两位小数；`cmap='RdBu_r'` 蓝-红反向色带（蓝=负相关、红=正相关）；`center=0` 以 0 为色带中性点（否则默认色带会被数据范围带偏）；`square=True` 格子正方形；`linewidths=0.8` 格子间距线；`annot_kws={'fontsize': 9}` 数字字号。
+- `sns.heatmap(...)` 参数：`annot=True` 在格子里写数值；`fmt='.2f'` 两位小数；`cmap='RdBu_r'` 蓝-红反向色带（蓝=负相关、红=正相关）；`center=0` 以 0 为色带中性点（否则默认色带会被数据范围带偏）；`square=True` 格子正方形；`linewidths=0.8` 格子间距线；`annot_kws={'fontsize': 8}` 数字字号（7×7 格子更密，字号调小）。
 - `_ln = lambda s: np.log1p(df[s].clip(lower=0))`：定义一个"log1p 变换"小函数。`clip(lower=0)` 先把负数截到 0（`Estimated_Time` 理论非负，防御性处理），`np.log1p` 即 ln(1+x)。**为什么这里也 log1p**：与指标构建口径一致——长尾变量在 log 尺度下相关更真实。
-- 三条 print：
-  - 浏览三指标（页数 / 时长 / 会话）两两相关 r≈0.86 / 0.82 / 0.59——**高度相关**，说明它们在度量同一件事"探索深度"。→ 结论：合成一个 E_Score，避免三个冗余变量。
-  - 加购 vs 浏览 r≈0.35——**弱相关**。→ 结论：加购未买（Friction）是与浏览独立的"购买意图受阻"维度，这正是未购臂首购潜力识别敢不依赖浏览量的依据。
-  - 未购占比 / 偏度复核。
+- 打印分**两个口径**：
+  - **log1p 后 Pearson**（与指标构建同口径）：页数↔时长 0.856、页数↔会话 0.824、时长↔会话 0.592——这是解读文字引用的数字；
+  - **Spearman**（= 热力图格子里的数值）：页数↔时长 0.925、页数↔会话 0.782、时长↔会话 0.643。两个口径数值相近但不同（Spearman 只看排序，对 log1p 前后差异不敏感；log1p-Pearson 与 E_Score 构建口径一致），打印出来是为了**让 print 与热力图对得上号**，避免读者在两张图/两套数字间困惑；
+  - 两条 print 的**结论相同**：浏览三指标**高度相关**（度量同一件事"探索深度"）→ 合成一个 E_Score；加购 vs 浏览 r≈0.35 **弱相关** → Friction 是独立的"购买意图受阻"维度。
 - `import numpy as np`：cell 里重复 import 无害（幂等），保证单独运行该 cell 也能工作。
 
 ---
 
-**Cell 15（markdown）**：`### 相关分析解读：指标构建的依据`（解读 + "EDA → 后续分析的因果逻辑"对照表，把每个 EDA 发现对应到后续处理方法——复习时重点看这张表，它是整个方法论的"为什么"）。
+**Cell 15（markdown）**：`### 相关分析解读：指标构建的依据`（解读 + "EDA → 后续分析的因果逻辑"对照表，把每个 EDA 发现对应到后续处理方法——复习时重点看这张表，它是整个方法论的"为什么"。注：解读引用的三指标相关系数 r≈0.86/0.82/0.59 为 log1p 后 Pearson 口径，热力图中显示的是 Spearman（0.93/0.78/0.64），两者结论一致）。
 
 # 定义指标
 
