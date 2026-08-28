@@ -551,6 +551,138 @@ def score_buyers(segmented: pd.DataFrame, nov: pd.DataFrame,
     return out
 
 
+def _next_month(m: str) -> str:
+    """'2019-10' -> '2019-11'（月份字符串递增）。"""
+    y, mo = int(m[:4]), int(m[5:7])
+    return f'{y + 1:04d}-01' if mo == 12 else f'{y:04d}-{mo + 1:02d}'
+
+
+def _history_train_samples(panel: pd.DataFrame, score_month: str, buyer: bool):
+    """构建打分月之前的所有 (特征月 → 次月标签) 训练样本（未购/已购人群），返回 (X, y)。
+
+    训练样本对象 = m 月用户（m < score_month），打分对象 = score_month 用户——
+    模型从未见过打分对象的结果（次月购买），严格避免"偷看答案"。
+    """
+    months = sorted(panel['month'].unique())
+    X_parts, y_parts = [], []
+    for m in months:
+        nm = _next_month(m)
+        if nm > score_month:
+            break
+        ev_m = panel[panel['month'].eq(m)]
+        ev_nm = panel[panel['month'].eq(nm)]
+        if ev_m.empty or ev_nm.empty:
+            continue
+        feats = build_features(ev_m, ev_m['event_time'].max())
+        buyers_nm = set(ev_nm.loc[ev_nm['event_type'].eq('purchase'), 'user_id'])
+        if buyer:
+            sub = feats[feats['Purchase_Frequency'].gt(0)].copy()
+            y = sub['user_id'].isin(buyers_nm).astype(int).to_numpy()
+            X_parts.append(_buyer_lr_features(sub))
+        else:
+            sub = feats[feats['Purchase_Frequency'].eq(0)].copy()
+            y = sub['user_id'].isin(buyers_nm).astype(int).to_numpy()
+            X_parts.append(_nonbuyer_lr_features(sub))
+        y_parts.append(y)
+    if not X_parts:
+        raise ValueError(
+            f'{score_month} 无法给出概率分：没有更早月份的训练数据。'
+            '（10 月是最早建模月，不需要选人；LR 需要"上上个月/上个月"的历史行为训练，'
+            '打分月最早从 11 月开始）')
+    return np.vstack(X_parts), np.concatenate(y_parts)
+
+
+def score_nonbuyers_history(panel: pd.DataFrame, score_month: str,
+                            pool_segments: list | None = None,
+                            top_ratio: float | None = None) -> pd.DataFrame:
+    """
+    LR 历史窗口打分（未购人群，严格无泄漏）——替代 score_nonbuyers 的演示版全量拟合。
+
+    时间窗口（3 个月）：
+    - **训练**：score_month 之前所有 (特征月 → 次月标签) 的未购用户样本
+      （如打分 12 月 = 10→11 与 11→12 两批，即"上上个月 + 上个月"的活动）；
+    - **打分**：score_month 未购用户（当月特征），规则圈池 + LR 池内排序，
+      取池内前 top_ratio（默认 50%）；
+    - **结果**：score_month 的次月购买（训练时不可见）。
+
+    ⚠️ 备注：**10 月无法给出概率分**——10 月是最早的建模/EDA 月，没有
+    更早月份的历史行为可用于训练；10 月本身也不需要选人。打分最早从
+    11 月开始（用 10 月特征 + 11 月标签训练）。
+    """
+    if pool_segments is None:
+        pool_segments = POOL_SEGMENTS
+    if top_ratio is None:
+        top_ratio = POOL_TOP_RATIO
+    X_train, y_train = _history_train_samples(panel, score_month, buyer=False)
+    pipe = _lr_pipeline()
+    pipe.fit(X_train, y_train)
+
+    ev_sc = panel[panel['month'].eq(score_month)]
+    feats_sc = build_features(ev_sc, ev_sc['event_time'].max())
+    seg_sc, _ = segment_users(feats_sc)
+    out = seg_sc.copy()
+    nb_mask = out['Purchase_Frequency'].eq(0)
+    nb = out.loc[nb_mask]
+    if nb.empty:
+        raise ValueError(f'{score_month} 没有未购用户，无法打分。')
+    proba = pipe.predict_proba(_nonbuyer_lr_features(nb))[:, 1]
+
+    out['First_Purchase_Prob'] = np.nan
+    out['First_Purchase_Rank'] = np.nan
+    out['TopK_Flag'] = np.nan
+    out.loc[nb_mask, 'First_Purchase_Prob'] = proba
+    pool_mask = nb_mask & out['User_Segment'].isin(pool_segments)
+    pool_idx = out.loc[pool_mask].index
+    if len(pool_idx) > 0:
+        ranks = pd.Series(proba, index=nb.index).loc[pool_idx].rank(ascending=False, method='min')
+        k = int(np.ceil(len(pool_idx) * top_ratio))
+        out.loc[pool_idx, 'First_Purchase_Rank'] = ranks
+        out.loc[pool_idx, 'TopK_Flag'] = (ranks <= k).astype(int)
+    return out
+
+
+def score_buyers_history(panel: pd.DataFrame, score_month: str,
+                         pool_segments: list | None = None,
+                         segmented: pd.DataFrame | None = None) -> pd.DataFrame:
+    """
+    LR 历史窗口打分（已购人群，严格无泄漏）——替代 score_buyers 的演示版全量拟合。
+
+    时间窗口与 score_nonbuyers_history 一致（训练 = score_month 之前的
+    (特征月 → 次月复购标签) 已购样本；打分 = score_month 已购用户，池内排名）。
+    segmented：可选——传入 score_nonbuyers_history 的结果可在其上叠加复购分列
+    （否则内部重新对 score_month 分层）。
+    ⚠️ 备注：10 月无法给出概率分（无更早训练数据；10 月为建模月不需要选人）。
+    """
+    if pool_segments is None:
+        pool_segments = POOL_SEGMENTS
+    X_train, y_train = _history_train_samples(panel, score_month, buyer=True)
+    pipe = _lr_pipeline()
+    pipe.fit(X_train, y_train)
+
+    if segmented is None:
+        ev_sc = panel[panel['month'].eq(score_month)]
+        feats_sc = build_features(ev_sc, ev_sc['event_time'].max())
+        seg_sc, _ = segment_users(feats_sc)
+        out = seg_sc.copy()
+    else:
+        out = segmented.copy()
+    buyer_mask = out['Purchase_Frequency'].gt(0)
+    buyer = out.loc[buyer_mask]
+    if buyer.empty:
+        raise ValueError(f'{score_month} 没有已购用户，无法打分。')
+    proba = pipe.predict_proba(_buyer_lr_features(buyer))[:, 1]
+
+    out['Repurchase_Prob'] = np.nan
+    out['Repurchase_Rank'] = np.nan
+    out.loc[buyer_mask, 'Repurchase_Prob'] = proba
+    pool_mask = buyer_mask & out['User_Segment'].isin(pool_segments)
+    pool_idx = out.loc[pool_mask].index
+    if len(pool_idx) > 0:
+        ranks = pd.Series(proba, index=buyer.index).loc[pool_idx].rank(ascending=False, method='min')
+        out.loc[pool_idx, 'Repurchase_Rank'] = ranks
+    return out
+
+
 def load_panel(path: Path | str = PANEL_FILE, months: list | None = None,
                columns: list | None = None) -> pd.DataFrame:
     """读取用户面板（parquet 或 CSV），解析 event_time 并确保 month 列（'YYYY-MM'）存在。

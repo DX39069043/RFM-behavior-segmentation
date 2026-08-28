@@ -16,7 +16,8 @@ import pandas as pd
 from analysis import (build_features, buyer_baseline, cohort_migration,
                       compute_engagement_metrics, export_tracking, fit_engagement_scalers,
                       flag_buyer_silence, gmm_intersection_threshold, load_panel, rate_test,
-                      rolling_validation, score_buyers, score_nonbuyers, segment_users)
+                      rolling_validation, score_buyers, score_buyers_history,
+                      score_nonbuyers, score_nonbuyers_history, segment_users)
 
 
 def make_events(n_users: int = 6) -> pd.DataFrame:
@@ -270,7 +271,54 @@ class TestScoreBuyers(unittest.TestCase):
         self.assertTrue(out[out['Purchase_Frequency'].eq(0)]['Repurchase_Prob'].isna().all())
 
 
-class TestExportTracking(unittest.TestCase):
+class TestScoreHistory(unittest.TestCase):
+    """LR 历史窗口打分（无泄漏）：训练 = 打分月之前的历史，10 月无法打分。"""
+
+    def _panel(self):
+        frames = []
+        for mi, month in enumerate(['2019-10', '2019-11', '2019-12']):
+            ev = make_events(12)
+            ev['event_time'] = ev['event_time'] + pd.Timedelta(days=mi * 31)
+            ev['month'] = month
+            if mi == 1:   # 11 月：未购用户（0、6）转为购买（未购标签两类）；部分已购用户（uid%3==2）不买（已购标签两类）
+                extra = ev[(ev['user_id'].isin([0, 6])) & (ev['event_type'] == 'cart')].copy()
+                extra['event_type'] = 'purchase'
+                ev = pd.concat([ev, extra], ignore_index=True)
+                ev = ev[~((ev['user_id'] % 3 == 2) & (ev['event_type'] == 'purchase'))]
+            if mi == 2:   # 12 月：让部分已购用户（uid%3==2）不买 → 已购训练标签两类
+                ev = ev[~((ev['user_id'] % 3 == 2) & (ev['event_type'] == 'purchase'))]
+            frames.append(ev)
+        return pd.concat(frames, ignore_index=True)
+
+    def test_nonbuyers_history_scoring(self):
+        panel = self._panel()
+        out = score_nonbuyers_history(panel, '2019-11')
+        for col in ['First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag']:
+            self.assertIn(col, out.columns)
+        pool_n = int((out['User_Segment'] == '高潜力首购用户').sum())
+        self.assertGreater(pool_n, 0)
+        expected_k = int(np.ceil(pool_n * 0.5))
+        # 池内前 50%（并列 rank 时可能略多），且不超过池内总人数
+        self.assertGreaterEqual(int(out['TopK_Flag'].sum()), expected_k)
+        self.assertLessEqual(int(out['TopK_Flag'].sum()), pool_n)
+        # 不在池内（普通浏览）无 Rank / Flag
+        browse = out[out['User_Segment'] == '普通浏览用户']
+        self.assertTrue(browse['First_Purchase_Rank'].isna().all())
+
+    def test_buyers_history_scoring(self):
+        panel = self._panel()
+        out = score_buyers_history(panel, '2019-11')
+        self.assertIn('Repurchase_Prob', out.columns)
+        buyer = out[out['Purchase_Frequency'].gt(0)]
+        self.assertFalse(buyer['Repurchase_Prob'].isna().all())
+
+    def test_october_cannot_score(self):
+        # 10 月是最早建模月，没有更早训练数据 → 无法给出概率分
+        panel = self._panel()
+        with self.assertRaises(ValueError):
+            score_nonbuyers_history(panel, '2019-10')
+        with self.assertRaises(ValueError):
+            score_buyers_history(panel, '2019-10')
     def test_columns(self):
         events = make_events(10)
         feats = build_features(events, events['event_time'].max())

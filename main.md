@@ -962,15 +962,21 @@ plt.show()
 
 **Cell 32（markdown）**：
 
+> ## 概率分 Top-k 选人（排序层）
+> 
 > 未购人群与已购人群的基准均显示：规则分层作为个体排序器弱于逻辑回归。因此：
->
+> 
 > - **排序层（选谁触达 / 谁要预警）**：
 >   - 未购用户 → 首购概率分 `First_Purchase_Prob`（Top-k 触达）；
 >   - 已购用户 → 复购概率分 `Repurchase_Prob`（Top-k 复购运营，Bottom-k〔分数最低的后 k 人，流失风险最高〕流失预警）；
 > - **解释层（怎么触达）**：保留 E_Score / Friction 分群与策略话术（购物车挽回 / 首购券 / 体验排障）；
-> - 名单同时输出概率分与分群标签；**规则圈池 + LR 池内排序**：候选池 = 规则认可、值得运营的人群（排除低意向的"普通浏览"），LR 概率分只在池内排名，`TopK_Flag` 标记池内应优先触达的前 50% 人（k = ceil(池内人数 × 50%)，比例在 config.POOL_TOP_RATIO 可调；选出来的都是规则认可的人，话术讲得清）。
-
-**两层架构的动机**：规则标签解释性强（能讲人话：加购未买 + 高探索 → 购物车挽回话术），但个体排序弱（AUC 0.53）；LR 概率分排序强（AUC 0.67）但不好解释。所以**选人用概率分（排序层），话术用标签（解释层）**——这是本项目"规则 + 模型"双层的核心设计。
+> - 名单同时输出概率分与分群标签；**规则圈池 + LR 池内排序**：候选池 = 规则认可、值得运营的人群
+>   （排除低意向的"普通浏览"），LR 概率分只在池内排名，`TopK_Flag` 标记池内应优先触达的前 50% 人
+>   （k = ceil(池内人数 × 50%)，比例在 config.POOL_TOP_RATIO 可调；选出来的都是规则认可的人，话术讲得清）。
+> - **时间窗口（避免偷看答案）**：规则只用当月行为打标签（2 个月：标签月 + 验证月）；
+>   LR 用"上上个月 + 上个月"的历史行为训练（特征月 → 次月标签）、在当月圈定的用户中打分选人（3 个月）。
+>   **10 月无法给出概率分**——10 月是最早建模月，没有更早历史可训练；10 月本身也不需要选人（建模/EDA 月），
+>   打分最早从 11 月开始（用 10 月特征 + 11 月标签训练，预测 12 月购买）。
 
 ---
 
@@ -978,16 +984,22 @@ plt.show()
 
 ```python
 # 概率分 Top-k 选人（排序层）：未购 → 首购分，已购 → 复购分
-from analysis import score_buyers, score_nonbuyers
+# ⚠️ 时间窗口设计（避免偷看答案）：
+#    - 规则分层只用"当月"行为打标签（2 个月：标签月 + 验证月）；
+#    - LR 需要"3 个月"：用【上上个月 + 上个月】的历史行为训练（特征月 → 次月标签），
+#      在【当月】圈定的用户中打分选人——训练数据严格不涉及打分对象的结果，无泄漏。
+#    - ⚠️ 因此 **10 月无法给出概率分**：10 月是最早建模月，没有更早历史可训练；
+#      10 月本身也不需要选人（它是建模/EDA 月）。打分最早从 11 月开始
+#      （用 10 月特征 + 11 月标签训练，给 11 月用户打分，预测 12 月购买）。
+from analysis import score_buyers_history, score_nonbuyers_history
 from config import POOL_TOP_RATIO
 
-final_df = score_nonbuyers(final_df, df_nov)
-final_df = score_buyers(final_df, df_nov)
+final_df = score_nonbuyers_history(panel, '2019-11')
+final_df = score_buyers_history(panel, '2019-11', segmented=final_df)
 k_rule = int((final_df['User_Segment'] == '高潜力首购用户').sum())
 print('名单新增列：未购用户 First_Purchase_Prob / First_Purchase_Rank / TopK_Flag；已购用户 Repurchase_Prob / Repurchase_Rank')
-print(f"规则圈池 + LR 池内排序：候选池（高潜力首购）{k_rule:,} 人 → TopK_Flag 标记池内前 {POOL_TOP_RATIO:.0%} "
-      f"（{int((final_df['TopK_Flag'] == 1).sum()):,} 人；比例在 config.POOL_TOP_RATIO 调整，\n"
-      f" 选出来的都是规则认可的人，话术讲得清）")
+print(f"规则圈池 + LR 池内排序（历史窗口训练，无泄漏）：候选池（11月高潜力首购）{k_rule:,} 人 → "
+      f"TopK_Flag 标记池内前 {POOL_TOP_RATIO:.0%}（{int((final_df['TopK_Flag'] == 1).sum()):,} 人）")
 
 # 未购人群按首购分排序的前 10 名预览
 top_preview = (final_df.loc[final_df['User_Segment'] == '高潜力首购用户',
@@ -995,11 +1007,11 @@ top_preview = (final_df.loc[final_df['User_Segment'] == '高潜力首购用户',
                .sort_values('First_Purchase_Rank').head(10))
 display(HTML(top_preview.to_html(index=False)))
 
-# 已购（高价值高摩擦 = 11月完全沉默）人群按复购分排序的前 10 名预览
-vip_preview = (final_df.loc[final_df['User_Segment'] == '高价值高摩擦用户',
-                            ['user_id', 'Value_Index', 'Repurchase_Prob', 'Repurchase_Rank']]
-               .sort_values('Repurchase_Rank').head(10))
-display(HTML(vip_preview.to_html(index=False)))
+# 已购人群按复购分排序的前 10 名预览（常规已购用户为例）
+buyer_preview = (final_df.loc[final_df['User_Segment'] == '常规已购用户',
+                              ['user_id', 'Value_Index', 'Repurchase_Prob', 'Repurchase_Rank']]
+                 .sort_values('Repurchase_Rank').head(10))
+display(HTML(buyer_preview.to_html(index=False)))
 
 # Top-k 名单规模核对
 print('TopK_Flag=1 的未购用户数:', int(final_df['TopK_Flag'].sum()))
@@ -1032,16 +1044,17 @@ import analysis as _ana
 importlib.reload(_ana)
 from analysis import export_tracking
 
-# 1) 全量分层名单：全部 6 类人群（运营按 User_Segment 筛选差异化策略：
-#    高潜力首购→首购激励 / 高价值高摩擦→流失召回 / 深度互动→会员运营 /
-#    常规已购→复购唤醒 / 直购→快捷复购 / 普通浏览→潜力池）
+# 1) 全量分层名单：11 月用户全部规则标签人群（运营按 User_Segment 筛选差异化策略：
+#    高潜力首购→首购激励 / 常规已购→复购唤醒 / 直购→快捷复购 / 深度互动→会员运营）
 tracking_all = export_tracking(final_df, 'user_segments_all_Nov.csv')
-print(f"已导出全量分层名单 {len(tracking_all):,} 名用户至 user_segments_all_Nov.csv")
+print(f"已导出全量分层名单 {len(tracking_all):,} 名用户（11月用户）至 user_segments_all_Nov.csv")
 
-# 2) 高潜力首购 + 高价值高摩擦两类人
+# 2) 候选触达名单：11 月高潜力首购用户（LR 池内排序，TopK_Flag=1 优先触达）
 tracking_cand = export_tracking(final_df, 'tracked_users_list_Nov.csv',
-                               segments=['高潜力首购用户', '高价值高摩擦用户'])
-print(f"已导出候选触达名单 {len(tracking_cand):,} 名用户（高潜力首购 + 高价值高摩擦）至 tracked_users_list_Nov.csv")
+                               segments=['高潜力首购用户'])
+print(f"已导出候选触达名单 {len(tracking_cand):,} 名用户（11月高潜力首购）至 tracked_users_list_Nov.csv")
+# 注：跨月沉默高价值（11 月基期高价值在 12 月完全沉默）需在 12 月底用 flag_buyer_silence
+#     单独判定（用于 1 月召回），不在本次 11 月打分名单内——沉默是事后标记，天然滞后一个月。
 ```
 
 **逐行/逐对象解释**：
