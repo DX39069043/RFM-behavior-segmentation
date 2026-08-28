@@ -16,17 +16,18 @@
 | # 用户价值与购买潜力分层 | 00 | 项目简介（markdown） |
 | # 环境导入 | 01–02 | 依赖导入、中文字体设置 |
 | # 数据加载与预处理 | 03–04 | 读取 7 个月面板（10 月建模 / 11 月验证）、构建用户特征 |
-| # EDA 探索性数据分析 | 05–11 | 数据总览、相关分析、EDA→方法的因果逻辑 |
-| # 定义指标 | 12–13 | E_Score / Friction / 价值指数定义 |
-| # 用户价值分层建模 | 14–15 | `segment_users` 两阶段分层 + 阈值 |
-| # 分层结果概览 | 16–17 | 各人群规模与平均消费图 |
-| # 分层结构透视（组内浓度占比） | 18–19 | 100% 堆叠图函数 |
-| # 模型验证 | 20–22 | 滚动时间外验证（正式验证） |
-| ## 汇总报告：各人群 11 月转化率 | 23–24 | 四组转化率对比（事前基期口径） |
-| ## 未购臂基准：逻辑回归 vs 规则 | 25–26 | LR 5 折 OOF 基准 |
-| ## 概率分 Top-k 圈人（排序层） | 27–28 | 首购分 / 复购分 + 预览 |
-| ## 结果持久化 | 29–30 | 导出运营名单 CSV |
-| ## 标签迁移分析 | 31–34 | 队列迁移（冻结阈值）+ 解读 + 构成图 |
+| # EDA 探索性数据分析 | 05–13 | 数据总览、单变量分布可视化、相关分析 |
+| ## 多变量相关分析 | 11–13 | 相关热力图 + 解读 |
+| # 定义指标 | 14–15 | E_Score / Friction / 价值指数定义 |
+| # 用户价值分层建模 | 16–17 | `segment_users` 两阶段分层 + 阈值 |
+| # 分层结果概览 | 18–19 | 各人群规模与平均消费图 |
+| # 分层结构透视（组内浓度占比） | 20–21 | 100% 堆叠图函数 |
+| # 模型验证 | 22–24 | 滚动时间外验证（正式验证） |
+| ## 汇总报告：各人群 11 月转化率 | 25–26 | 四组转化率对比（事前基期口径） |
+| ## 未购臂基准：逻辑回归 vs 规则 | 27–28 | LR 5 折 OOF 基准 |
+| ## 概率分 Top-k 圈人（排序层） | 29–30 | 首购分 / 复购分 + 预览 |
+| ## 结果持久化 | 31–32 | 导出运营名单 CSV |
+| ## 标签迁移分析 | 33–36 | 队列迁移（冻结阈值）+ 解读 + 构成图 |
 
 ---
 
@@ -130,7 +131,6 @@ df.head()
 - `df = build_features(oct_events, oct_events['event_time'].max())`：
   - 入参：10 月全部事件 + 观察期结束时间（`event_time` 的最大值，用于计算"距最近购买的天数"）；
   - 出参：**每个用户一行**的特征表（约 15.1 万用户 × 12+ 列），列包括 `user_id, Purchase_Frequency, Total_Spending, Pages_Viewed, Estimated_Time, Recency_Days, Session_Count, Cart_Products, Purchased_Products, E_Score, Friction, Log_Friction`；
-  - **为什么不在 Notebook 里写特征代码**：`analysis.py` 是单一事实来源——Notebook、`run_rolling.py`、`run_cohort.py`、单元测试都调用同一个 `build_features`，保证口径一致、可测试。
 - `df.head()`：预览前 5 行（Notebook 会自动渲染成表格）。
 
 ---
@@ -176,13 +176,84 @@ display(summary)
 
 **Cell 08（markdown）**：`### 数据总览解读：三个直接影响后续方法的发现`（解读文字，含"未购 88.4% / 长尾 skew≈50~60 / 加购未买稀疏 4.4%"三点，及其对应的处理方案）。
 
-## 多变量相关分析
+### 单变量分布可视化：长尾与零膨胀的直观印证
 
-**Cell 09（markdown）**：`## 多变量相关分析`（小节标题）。
+**Cell 09（markdown）** —— 新插入的小节说明：
+
+> Cell 07 的描述统计已给出偏度（skew≈50~60），这里用直方图直接看分布形状：
+>
+> - **原始值**：几乎所有变量都**堆积在 0 附近**（消费 / 频次 / 加购的 0 值占比 88%~96%），右侧是极长的尾巴——绝大多数细节被挤压成一根竖线；
+> - **log1p 变换后**：长尾被压缩，才能看清真实形态——消费/频次是"大量 0 + 平滑正尾"，页数/时长近似单峰，加购是极端零膨胀；
+> - **Recency_Days**：未购用户全部落在兜底值（观察期长度），已购用户散布在左侧 → 印证"近度主要区分买没买"。
+>
+> 结论：这就是为什么后面所有指标用 **log1p 压缩**、阈值用 **GMM 动态拟合**（而不是固定分箱）——固定分箱会被长尾和零膨胀带偏。
 
 ---
 
-**Cell 10（代码）** —— 相关热力图 + 关键相关系数：
+**Cell 10（代码）** —— 单变量分布图（原始值 vs log1p 变换）：
+
+```python
+# ═══════════════════════════════════════════════════
+# 单变量分布：原始值 vs log1p 变换（印证长尾 / 零膨胀）
+# ═══════════════════════════════════════════════════
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+plot_cols = target_numeric + ['Session_Count']   # 与 Cell 07 的数值列一致 + 会话数（相关分析用）
+n = len(plot_cols)                               # 7 个变量
+
+# ── 图 1：原始值分布（全范围）──
+fig, axes = plt.subplots(2, 4, figsize=(17, 7.5))
+axes = axes.ravel()
+for ax, col in zip(axes, plot_cols):
+    v = df[col].clip(lower=0)
+    zero_pct = (v == 0).mean()
+    sns.histplot(v, bins=60, ax=ax, color='#4CB391', kde=True)
+    ax.set_title(f'{col}（0值占比 {zero_pct:.0%}）', fontsize=10)
+    ax.set_xlabel('')
+for ax in axes[n:]:
+    ax.axis('off')
+plt.suptitle('单变量分布（原始值）：全部严重右偏 / 零膨胀，右侧长尾细节被挤压不可见',
+             fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+# ── 图 2：log1p 变换后的分布（长尾压缩后形态可见）──
+fig, axes = plt.subplots(2, 4, figsize=(17, 7.5))
+axes = axes.ravel()
+for ax, col in zip(axes, plot_cols):
+    sns.histplot(np.log1p(df[col].clip(lower=0)), bins=60, ax=ax, color='#66b3ff', kde=True)
+    ax.set_title(f'log1p({col})', fontsize=10)
+    ax.set_xlabel('')
+for ax in axes[n:]:
+    ax.axis('off')
+plt.suptitle('log1p 变换后：长尾压缩，分布形态（双峰 / 单峰 / 零膨胀）清晰可见',
+             fontsize=14, fontweight='bold')
+plt.tight_layout()
+plt.show()
+```
+
+**逐行/逐对象解释**：
+
+- `plot_cols = target_numeric + ['Session_Count']`：在 Cell 07 的 6 个数值列基础上补上 `Session_Count`（会话数）——相关分析里也要用到它，分布一起看；共 7 个变量。
+- `n = len(plot_cols)`：7；2×4 网格有 8 格，循环画完 7 个变量后用 `axes[n:].axis('off')` 把多余的第 8 格关掉（避免出现空白格子干扰视觉）。
+- **图 1（原始值，全范围）**：
+  - `v = df[col].clip(lower=0)`：防御性把负值截到 0（理论计数非负，防止极端脏数据破坏直方图）；
+  - `zero_pct = (v == 0).mean()`：计算"该变量为 0 的用户占比"，写进子图标题——**一眼看出零膨胀程度**（实测：消费 / 频次 / 加购都是 88%~96%，页数 / 会话数为 0%）；`{zero_pct:.0%}` 格式化成百分比；
+  - `sns.histplot(v, bins=60, ax=ax, color='#4CB391', kde=True)`：seaborn 直方图 + 核密度曲线（KDE）。`bins=60` 分 60 个桶；KDE 是平滑的概率密度估计，帮助看出峰的位置；
+  - 由于最大值极大（消费 84,782、时长 14 万秒），非零部分被挤压到 0 附近的几个桶里、右侧只剩一条细线——**这正是想展示的"长尾"视觉冲击**。
+- **图 2（log1p 变换后）**：`np.log1p(df[col].clip(lower=0))` 即 ln(1+x)，把长尾压缩回正常尺度后再画直方图——此时才能看清真实形态：消费 / 频次是"0 值大峰 + 平滑正尾"、页数近似单峰、`Cart_Products` 是极端零膨胀（几乎只有 0 和 1 两个值）、`Recency_Days` 在兜底值处有个尖峰（未购用户）。
+- **这两张图对比的意义**：把 Cell 08 解读文字里的"长尾、零膨胀"变成**眼见为实**，并让"为什么后面所有指标用 log1p、阈值用 GMM 动态拟合"有一个直观的分布依据。
+
+---
+
+
+**Cell 11（markdown）**：`## 多变量相关分析`（小节标题）。
+
+---
+
+**Cell 12（代码）** —— 相关热力图 + 关键相关系数：
 
 ```python
 # 3a. 相关性热力图
@@ -220,11 +291,11 @@ print(f'未购用户占比: {(df["Purchase_Frequency"]==0).mean():.1%} | 消费�
 
 ---
 
-**Cell 11（markdown）**：`### 相关分析解读：指标构建的依据`（解读 + "EDA → 后续分析的因果逻辑"对照表，把每个 EDA 发现对应到后续处理方法——复习时重点看这张表，它是整个方法论的"为什么"）。
+**Cell 13（markdown）**：`### 相关分析解读：指标构建的依据`（解读 + "EDA → 后续分析的因果逻辑"对照表，把每个 EDA 发现对应到后续处理方法——复习时重点看这张表，它是整个方法论的"为什么"）。
 
 # 定义指标
 
-**Cell 12（markdown）**：
+**Cell 14（markdown）**：
 
 > 1. **探索度 E_Score** — 浏览页数、有效停留时长（会话内相邻事件间隔 <30 分钟累计的活跃秒数）、会话数经 log1p 标准化后的均值（衡量用户探索深度）
 > 2. **摩擦 Friction** — 加购但未购买的去重商品数（Cart_Products − Purchased_Products，log1p），度量"加购了却没买"的购买意图受阻（未购臂首购潜力识别用）
@@ -236,7 +307,7 @@ print(f'未购用户占比: {(df["Purchase_Frequency"]==0).mean():.1%} | 消费�
 
 ---
 
-**Cell 13（代码）** —— 验证特征列存在：
+**Cell 15（代码）** —— 验证特征列存在：
 
 ```python
 # 特征构建与分层指标统一由 analysis.py 提供（单一事实来源）
@@ -249,7 +320,7 @@ df[['user_id', 'E_Score', 'Friction']].head()
 
 # 用户价值分层建模
 
-**Cell 14（markdown）**：
+**Cell 16（markdown）**：
 
 > 以 analysis.py 的 `segment_users` 与 `flag_buyer_silence` 为准：
 >
@@ -262,7 +333,7 @@ df[['user_id', 'E_Score', 'Friction']].head()
 
 ---
 
-**Cell 15（代码）** —— 执行分层：
+**Cell 17（代码）** —— 执行分层：
 
 ```python
 from analysis import segment_users, segment_summary
@@ -293,11 +364,11 @@ segment_summary(final_df)
 
 # 分层结果概览
 
-**Cell 16（markdown）**：`# 分层结果概览`（章节标题）。
+**Cell 18（markdown）**：`# 分层结果概览`（章节标题）。
 
 ---
 
-**Cell 17（代码）** —— 人群规模与平均消费图：
+**Cell 19（代码）** —— 人群规模与平均消费图：
 
 ```python
 # 各人群规模与平均消费概览
@@ -336,11 +407,11 @@ plt.show()
 
 # 分层结构透视（组内浓度占比）
 
-**Cell 18（markdown）**：`# 分层结构透视（组内浓度占比）`（章节标题）。
+**Cell 20（markdown）**：`# 分层结构透视（组内浓度占比）`（章节标题）。
 
 ---
 
-**Cell 19（代码）** —— 100% 组内归一化堆叠图函数：
+**Cell 21（代码）** —— 100% 组内归一化堆叠图函数：
 
 ```python
 def plot_strategic_segments_matrix_100pct(df):
@@ -472,11 +543,11 @@ plot_strategic_segments_matrix_100pct(final_df)
 
 # 模型验证
 
-**Cell 20（markdown）**：`# 模型验证`（章节标题）。
+**Cell 22（markdown）**：`# 模型验证`（章节标题）。
 
 ## 时间外验证（滚动，正式验证）：7 个月面板逐对检验
 
-**Cell 21（markdown）**：
+**Cell 23（markdown）**：
 
 > 在 7 个月面板上逐对运行时间外验证（基期月 t 建模 → 未来月验证），作为**正式验证**——10 月基期约 15 万用户，样本量与跨月重复（6 组实验一 + 5 组实验二）都优于单一月份对：
 >
@@ -490,7 +561,7 @@ plot_strategic_segments_matrix_100pct(final_df)
 
 ---
 
-**Cell 22（代码）** —— 滚动验证结果加载 / 重算 + 展示：
+**Cell 24（代码）** —— 滚动验证结果加载 / 重算 + 展示：
 
 ```python
 # ═══════════════════════════════════════════════════
@@ -647,11 +718,11 @@ plt.show()
 
 ## 汇总报告：各人群 11 月转化率对比（面板口径）
 
-**Cell 23（markdown）**：`## 汇总报告：各人群 11 月转化率对比（面板口径）`（小节标题）。
+**Cell 25（markdown）**：`## 汇总报告：各人群 11 月转化率对比（面板口径）`（小节标题）。
 
 ---
 
-**Cell 24（代码）** —— 四组 11 月转化率对比（含存活偏差修复）：
+**Cell 26（代码）** —— 四组 11 月转化率对比（含存活偏差修复）：
 
 ```python
 # ═══════════════════════════════════════════════════
@@ -727,7 +798,7 @@ display(HTML(report.to_html(index=False)))
 
 ## 未购臂基准：逻辑回归 vs 规则分层
 
-**Cell 25（markdown）**：
+**Cell 27（markdown）**：
 
 > 用逻辑回归（5 折 OOF：5 折交叉验证中，每折用"没训练过该折数据"的模型做预测，避免高估）检验规则分层（手工阈值打标签）作为个体排序器的判别力，输出 AUC / 校准误差(Brier) / Top-k 购买率等关键指标。
 
@@ -735,7 +806,7 @@ display(HTML(report.to_html(index=False)))
 
 ---
 
-**Cell 26（代码）** —— 未购臂 LR 基准：
+**Cell 28（代码）** —— 未购臂 LR 基准：
 
 ```python
 # ═══════════════════════════════════════════════════
@@ -775,7 +846,7 @@ print(pd.Series(m['coefficients']).round(4).to_string())
 
 ## 概率分 Top-k 圈人（排序层）
 
-**Cell 27（markdown）**：
+**Cell 29（markdown）**：
 
 > 未购臂与已购臂的基准均显示：规则分层作为个体排序器弱于逻辑回归。因此：
 >
@@ -789,7 +860,7 @@ print(pd.Series(m['coefficients']).round(4).to_string())
 
 ---
 
-**Cell 28（代码）** —— 打概率分 + 预览：
+**Cell 30（代码）** —— 打概率分 + 预览：
 
 ```python
 # 概率分 Top-k 圈人（排序层）：未购 → 首购分，已购 → 复购分
@@ -823,7 +894,7 @@ print('TopK_Flag=1 的未购用户数:', int(final_df['TopK_Flag'].sum()))
 - `score_nonbuyers(final_df, df_nov)`（analysis.py）：对未购用户全量拟合 LR（特征同上）→ 加 3 列：`First_Purchase_Prob`（首购概率）、`First_Purchase_Rank`（概率降序排名，`rank(method='min')` 并列同 rank）、`TopK_Flag`（rank ≤ k 置 1，k = 规则人群规模 5408）。已购用户这三列保持 NaN。
 - `score_buyers(final_df, df_nov)`：对已购用户（`Purchase_Frequency > 0`）拟合复购 LR（7 维 RFM+行为特征）→ 加 `Repurchase_Prob` / `Repurchase_Rank`。未购用户保持 NaN。
 - `k_rule = int((final_df['User_Segment'] == '高潜力首购用户').sum())`：规则人群规模（5408）作为"同预算"基准——**触达预算按规则圈出的人数算，再让 LR 用同样的钱选人**，比较才公平。
-- `m = bl['metrics']`：复用 Cell 26 的 OOF 指标。打印"规则 Top-k 13.30% → LR Top-k 16.31%"——**这就是"概率分比规则圈人更强"的一行证据**。
+- `m = bl['metrics']`：复用 Cell 28 的 OOF 指标。打印"规则 Top-k 13.30% → LR Top-k 16.31%"——**这就是"概率分比规则圈人更强"的一行证据**。
 - `top_preview`：高潜力首购人群内按首购分排名取前 10（列：user_id / E_Score / Friction / 概率分 / 排名 / TopK_Flag）。注意**此时 `User_Segment` 仍是 flag 后的标签**（高潜力首购不受 flag 影响）。
 - `vip_preview`：高价值高摩擦（= 11 月完全沉默的 VIP）人群按**复购分**排序取前 10。**为什么看复购分**：复购概率越低流失风险越高，`Repurchase_Rank` 最小的其实是复购分最高的人——这里取 `sort_values('Repurchase_Rank').head(10)` 展示的是"复购分最高"的沉默 VIP（最值得优先召回挽回的）。运营上也可取 rank 最大的（Bottom-k，流失最严重）。
 - `int(final_df['TopK_Flag'].sum())`：核对 TopK_Flag=1 的人数应等于 5408。
@@ -832,11 +903,11 @@ print('TopK_Flag=1 的未购用户数:', int(final_df['TopK_Flag'].sum()))
 
 ## 结果持久化
 
-**Cell 29（markdown）**：`## 结果持久化`（小节标题）。
+**Cell 31（markdown）**：`## 结果持久化`（小节标题）。
 
 ---
 
-**Cell 30（代码）** —— 导出运营名单：
+**Cell 32（代码）** —— 导出运营名单：
 
 ```python
 from analysis import export_tracking
@@ -852,13 +923,13 @@ print(f"已导出 {len(tracking):,} 名候选用户（高潜力首购 + 高价�
   - 保留 10 列：`user_id, User_Segment, E_Score, Friction, Value_Index, First_Purchase_Prob, First_Purchase_Rank, TopK_Flag, Repurchase_Prob, Repurchase_Rank`——**排序层（概率分/排名） + 解释层（标签/指标）双齐全**；
   - `to_csv(..., encoding='utf-8-sig')` 带 BOM，Excel 直接打开不乱码。
 - 名单规模 6,792 = 5,408（高潜力首购）+ 1,384（沉默高价值）。
-- **用途**：这份名单是后续随机 A/B 触达实验的**抽样框**——运营按预算取 `rank ≤ 预算` 即可圈人。⚠️ 注意名单的 `First_Purchase_Prob` 用了 11 月结果拟合（全量拟合，非 OOF），若用于 11 月当月触达存在泄漏；评估预期效果应以 Cell 26/22 的 OOF 指标为准，上线需滚动窗口重训重校准。
+- **用途**：这份名单是后续随机 A/B 触达实验的**抽样框**——运营按预算取 `rank ≤ 预算` 即可圈人。⚠️ 注意名单的 `First_Purchase_Prob` 用了 11 月结果拟合（全量拟合，非 OOF），若用于 11 月当月触达存在泄漏；评估预期效果应以 Cell 28/22 的 OOF 指标为准，上线需滚动窗口重训重校准。
 
 ---
 
 ## 标签迁移分析
 
-**Cell 31（markdown）**：
+**Cell 33（markdown）**：
 
 > 固定基期月（2019-10）分层后，逐月追踪**同一批用户**（队列：固定 10 月那批用户，看他们后续月的标签变化；7 个月用户面板，5% 抽样约 78 万用户），用**冻结的 10 月阈值**（固定沿用 10 月拟合的切分线，不让每月重算）重算后续月标签——高价值直购 / 深度互动 / 常规已购 是保持、降级、升级还是沉默？
 >
@@ -871,7 +942,7 @@ print(f"已导出 {len(tracking):,} 名候选用户（高潜力首购 + 高价�
 
 ---
 
-**Cell 32（代码）** —— 读取队列迁移结果：
+**Cell 34（代码）** —— 读取队列迁移结果：
 
 ```python
 # ═══════════════════════════════════════════════════
@@ -902,11 +973,11 @@ LABELS_ORDER = ['普通浏览用户', '高潜力首购用户', '常规已购用�
 - `OUTPUT_COHORT_LABELS`：`cohort_frozen_labels.csv` 路径（config.py 集中管理）。
 - 文件存在性检查：缺失时 `SystemExit` 提示运行 `run_cohort.py`（结果默认入库，clone 可直接读）。
 - `fl`：冻结标签表，结构 = `基期标签 × month × 各冻结标签占比列`（如"常规已购用户 / 2019-11 / 常规已购 16.2% / 无任何活动 40.5% / ..."）。由 `run_cohort.py` → `analysis.cohort_migration` 生成：固定 10 月基期分层 → 逐月用冻结阈值重算同一批用户标签 → 行内归一占比。
-- `LABELS_ORDER`：6 个标签的展示顺序常量（供 Cell 34 图表排序）。
+- `LABELS_ORDER`：6 个标签的展示顺序常量（供 Cell 36 图表排序）。
 
 ---
 
-**Cell 33（markdown）** —— 解读（数字已按最新冻结标准化产物同步）：
+**Cell 35（markdown）** —— 解读（数字已按最新冻结标准化产物同步）：
 
 > **① 标签保持率**（10 月各标签队列在后续月仍保持原标签的比例，越高 = 越稳定）：
 >
@@ -940,7 +1011,7 @@ LABELS_ORDER = ['普通浏览用户', '高潜力首购用户', '常规已购用�
 
 ---
 
-**Cell 34（代码）** —— 各标签逐月构成堆叠图：
+**Cell 36（代码）** —— 各标签逐月构成堆叠图：
 
 ```python
 # ═══════════════════════════════════════════════════
@@ -1035,4 +1106,4 @@ plt.show()
 
 ---
 
-*本文档由 main.ipynb（提交 1caa95d 之后状态）逐 cell 生成；如 notebook 更新，请同步维护本文件。*
+*本文档由 main.ipynb（提交 6534786 之后 + EDA 新增单变量分布可视化）逐 cell 生成；如 notebook 更新，请同步维护本文件。*
