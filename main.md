@@ -23,7 +23,7 @@
 | # 分层结果概览 | 20–23 | 各人群规模与平均消费图 + 结构透视（组内浓度占比堆叠图） |
 | # 模型验证 | 24–27 | 滚动时间外验证（正式验证）+ 无泄漏补充实验 |
 | ## 汇总报告：各人群 11 月转化率 | 28–29 | 四组转化率对比（事前基期口径） |
-| ## 未购人群基准：逻辑回归 vs 规则 | 30–31 | LR 5 折 OOF 基准 |
+| ## 机器学习对照组：逻辑回归 vs 规则 | 30–31 | 滚动基准表（基线/规则/LR）+ AUC 对比 |
 | ## 概率分 Top-k 选人（排序层） | 32–33 | 首购分 / 复购分 + 预览 |
 | ## 结果持久化 | 34–35 | 导出运营名单 CSV |
 | ## 标签迁移分析 | 36–39 | 队列迁移（冻结阈值）+ 解读 + 构成图 |
@@ -642,17 +642,20 @@ plot_strategic_segments_matrix_100pct(final_df)
 
 **Cell 24（markdown）**：`# 模型验证`（章节标题）。
 
-## 时间外验证（滚动，正式验证）：7 个月面板逐对检验
+## 时间外验证（滚动，正式验证）：7 个月面板逐对检验（实验一、二）
 
 **Cell 25（markdown）**：
 
-> 在 7 个月面板上逐对运行时间外验证（基期月 t 建模 → 未来月验证），作为**正式验证**——10 月基期约 15 万用户，样本量与跨月重复（6 组实验一 + 5 组实验二）都优于单一月份对：
->
-> - **①a 实验一（未购人群）**：基期月 t → 观察月 t+1 购买（2 月对，6 组）；
-> - **①b 实验二（已购人群·跨月沉默）**：基期月 t 高价值买家 → 观察月 t+1 完全沉默（= 高价值高摩擦）→ 验证月 t+2 是否购买（3 月组，5 组；用 t+2 做结果，避免"沉默月=结果月"循环）；
-> - **②a/②b 两套 LR 基准**（逻辑回归作为对照模型，量化"规则分层 vs 直接建模"的差距）：未购人群预测 t+1 首购；已购人群以"沉默"为规则标记预测 t+2 复购。
->
-> 解读要点：实验一购买率差（目标组购买率 − 对照组购买率）应跨月稳定为正（标签稳健性）；实验二（沉默）若显著为负且方向一致，说明"跨月完全沉默"是可靠的流失信号；LR AUC 跨月稳定优于规则 → 概率分选人优先。
+> ## 时间外验证：7 个月数据逐对检验
+> 
+> 在 7 个月面板上逐对运行时间外验证（基期月 t 建模 → 未来月验证），用未来月份的数据检验标签的判别力（机器学习对照组见后文独立章节）：
+> 
+> - **实验一（未购人群）**：先用某个月（比如 10 月）的行为给用户打标签，再看这些人下一个月（11 月）有没有买。连续做 6 组
+> - **实验二（已购人群·跨月沉默）**：先看某个月（10 月）的高价值用户，在下一个月（11 月）完全没有任何动作（没浏览、没加购、没购买），这种人标记为"高价值高摩擦"（疑似流失）；然后看再下一个月（12 月）他们买没买，一共做 5 组。
+> 
+> 实验结果解读：
+> - 实验一：比较"高潜力首购用户"和"普通浏览用户"的次月购买率，前者应该明显更高，而且要连续 6 个月每次都高，才说明这个标签具有价值；
+> - 实验二：比较"高价值沉默用户"和"普通高价值用户"的次月购买率，前者应该明显更低，而且连续 5 次验证每个月都这样——如果是，说明"跨月完全沉默"确实预示流失，可以用来做流失预警。
 
 **为什么实验二必须用 3 月组**：沉默的定义是"观察月 t+1 无任何行为"。若用 t+1 的购买作为结果，那"沉默组"在定义上就注定买不了（无行为），结论是循环论证（"沉默月=结果月"）。所以把结果推到 t+2——先看 t+1 是否沉默，再看 t+2 是否购买。
 
@@ -707,9 +710,9 @@ def fmt_rates(df, keep_cols):
 rates1 = rates[rates['实验'].str.contains('高潜力首购')].copy()
 rates2 = rates[rates['实验'].str.contains('沉默')].copy()
 
-display(HTML('<h3>①a 实验一（未购人群）：高潜力首购 vs 普通浏览 → 次月购买率</h3>'))
-display(HTML('<p style="color:#555">怎么读：每一行是一次"用基期月标签预测下月首购"的时间外验证。比较<b>目标组 vs 对照组购买率</b>：'
-             '目标组明显更高（且 p&lt;0.05）⇒ "高潜力首购"标签能预测首购（本表 6 行全部显著）。</p>'))
+display(HTML('<h3>实验一（未购人群）</h3>'))
+display(HTML('<p style="color:#555">每一行是一次时间外验证。比较<b>目标组 vs 对照组购买率</b>：'
+             '目标组明显更高（且 p&lt;0.05）（ 6 行实验结果全部显著）。</p>'))
 display(HTML('<p style="color:#777">小提醒：这里说的"未购用户"，指 <b>10 月这个月里没有买过东西</b>的人'
              '（看的是当月行为记录），不是"从来都没买过"的新人。所以实验一验证的是：10 月没买、但'
              '有加购没买或浏览行为的人，11 月是不是更容易买。这批人里可能混着以前买过、10 月没买的人'
@@ -717,45 +720,13 @@ display(HTML('<p style="color:#777">小提醒：这里说的"未购用户"，指
 display(HTML(fmt_rates(rates1, ['训练月', '验证月', '目标人数', '目标购买率',
                                 '对照人数', '对照购买率', 'p值']).to_html(index=False)))
 
-display(HTML('<h3>①b 实验二（已购人群·沉默）：沉默高价值 vs 活跃高价值 → 验证月购买率</h3>'))
-display(HTML('<p style="color:#555">怎么读：每一行是一次 3 月组验证（基期 t 高价值买家 → 观察月 t+1 完全沉默 → 验证月 t+2 是否购买，'
-             '避免"沉默月=结果月"循环）。比较<b>沉默组 vs 对照组购买率</b>：沉默组明显更低（且 p&lt;0.05）'
-             '⇒ "跨月完全沉默"预示流失（本表 5 行全部显著）。</p>'))
+display(HTML('<h3>实验二（已购人群）</h3>'))
+display(HTML('<p style="color:#555">每一行是一次 3 月组验证（基期 t 高价值买家 → 观察月 t+1 完全沉默 → 验证月 t+2 是否购买'
+             '）。比较<b>沉默组 vs 对照组购买率</b>：沉默组明显更低（且 p&lt;0.05）'
+             '（ 5 行实验结果全部显著）。</p>'))
 display(HTML(fmt_rates(rates2, ['训练月', '沉默月', '验证月', '目标人数', '目标购买率',
                                 '对照人数', '对照购买率', 'p值']).to_html(index=False)))
 
-# ── 滚动基准表（两套 LR）格式化 + 按人群拆分 ──
-def fmt_aucs(df, keep_cols):
-    out = df.copy()
-    # 基线 / 规则 / LR 三个购买率列（未购人群与已购人群各两列，另一人群的列为 NaN 显示为 —）
-    out['全体未购用户平均首购率'] = out['全体未购用户平均首购率'].map(fmt_pct)
-    out['高潜力首购用户购买率'] = out['高潜力首购用户购买率'].map(fmt_pct)
-    out['全体已购用户平均复购率'] = out['全体已购用户平均复购率'].map(fmt_pct)
-    out['高价值高摩擦用户复购率'] = out['高价值高摩擦用户复购率'].map(fmt_pct)
-    out['规则 AUC'] = out['规则 AUC'].map(lambda x: f'{x:.3f}')
-    out['LR AUC (OOF)'] = out['LR AUC (OOF)'].map(lambda x: f'{x:.3f}')
-    out['LR Top-k 率'] = out['LR Top-k 率'].map(fmt_pct)
-    return out[keep_cols]
-
-aucs1 = aucs[aucs['人群'].str.contains('未购人群')].copy()
-aucs2 = aucs[aucs['人群'].str.contains('已购人群')].copy()
-
-display(HTML('<h3>②a 基准（未购人群·首购）：规则分层 vs 逻辑回归</h3>'))
-display(HTML('<p style="color:#555">怎么读：三列对比——<b>全体未购用户平均首购率</b>（什么都不做的基线）、'
-             '<b>高潜力首购用户购买率</b>（手工规则圈出的人）、<b>LR Top-k 率</b>（逻辑回归按分数取前 k 人，'
-             'k = 规则圈出的人数，同预算对比）。同样人数下 LR 的购买率最高 ⇒ 概率分比规则标签更擅长按分数排序选人'
-             '（规则标签留作解释层）；AUC 衡量整体排序准不准（0.5=随机，越接近 1 越好）。</p>'))
-display(HTML(fmt_aucs(aucs1, ['训练月', '验证月', '样本', '全体未购用户平均首购率', '高潜力首购用户购买率',
-                              '规则人群规模', '规则 AUC', 'LR AUC (OOF)', 'LR Top-k 率']).to_html(index=False)))
-
-display(HTML('<h3>②b 基准（已购人群·复购）：规则分层 vs 逻辑回归</h3>'))
-display(HTML('<p style="color:#555">怎么读：三列对比——<b>全体已购用户平均复购率</b>（基线）、'
-             '<b>高价值高摩擦用户复购率</b>（跨月沉默规则的复购率，极低 = 流失预警有效）、'
-             '<b>LR Top-k 率</b>（逻辑回归按复购分取前 k 人）。'
-             '<b>LR AUC (OOF) 稳定高于规则 AUC</b> ⇒ 复购概率分比沉默规则更擅长按分数排序选人。'
-             '注意：沉默规则是"流失识别器"，其复购 AUC 低于 0.5 属正常（负向指标）。</p>'))
-display(HTML(fmt_aucs(aucs2, ['训练月', '沉默月', '验证月', '样本', '全体已购用户平均复购率', '高价值高摩擦用户复购率',
-                              '规则人群规模', '规则 AUC', 'LR AUC (OOF)', 'LR Top-k 率']).to_html(index=False)))
 # 拆分展示：实验一（未购人群）与实验二（已购人群·沉默）分开看，避免两类实验混排
 
 # ── 可视化一：购买率对比（实验一 / 实验二 分面柱状图）──
@@ -786,21 +757,6 @@ ax = piv.plot(marker='o', figsize=(10, 4.5))
 ax.axhline(0, color='gray', ls='--', lw=1)
 ax.set_ylabel('购买率差 (pp)')
 ax.set_title('目标组−对照组购买率之差跨月趋势：实验一为正（标签有效）；实验二为负（沉默=流失）', fontsize=13)
-plt.tight_layout()
-plt.show()
-
-# ── 可视化三：LR 基准 AUC 对比 ──
-x = np.arange(len(aucs)); w = 0.36
-fig, ax = plt.subplots(figsize=(11, 4.8))
-ax.bar(x - w/2, aucs['规则 AUC'], w, label='规则分层', color='#c2c2c2')
-ax.bar(x + w/2, aucs['LR AUC (OOF)'], w, label='逻辑回归 (OOF)', color='#66b3ff')
-ax.axhline(0.5, color='gray', ls='--', lw=1, label='随机水平 = 0.5')
-labels = [f"{r['训练月']}→{r['验证月']}" + (f"\n(沉默月 {r['沉默月']})" if pd.notna(r['沉默月']) else '')
-          for _, r in aucs.iterrows()]
-ax.set_xticks(x); ax.set_xticklabels(labels, rotation=45, ha='right')
-ax.set_ylabel('AUC')
-ax.set_title('LR 基准：逻辑回归 AUC 稳定高于规则分层（均优于随机 0.5）', fontsize=13)
-ax.legend()
 plt.tight_layout()
 plt.show()
 ```
@@ -854,7 +810,7 @@ plt.show()
 
 ---
 
-**Cell 29（代码）** —— 四组 11 月转化率对比（含存活偏差修复）：
+**Cell 29（代码）** —— 六组 11 月转化率对比（含存活偏差修复）：
 
 ```python
 # ═══════════════════════════════════════════════════
@@ -862,10 +818,10 @@ plt.show()
 # ═══════════════════════════════════════════════════
 from analysis import flag_buyer_silence
 
-# 已购人群"高摩擦" = 跨月完全沉默：10月高价值买家在 11 月无任何行为
+# 已购人群“高摩擦” = 跨月完全沉默：10月高价值买家在 11 月无任何行为
 # ⚠️ 口径说明：先保存 10 月基期标签（Base_User_Segment），再做沉默分流。
-# 四组转化率一律按【事前基期口径】计算（分母 = 10 月全量该标签用户）。
-# 若改用 flag 后的 User_Segment 选 VIP，只会剩"11 月仍活跃"的用户，
+# 六组转化率一律按【事前基期口径】计算（分母 = 10 月全量该标签用户；高价值高摩擦为 flag 后标签）（分母 = 10 月全量该标签用户）。
+# 若改用 flag 后的 User_Segment 选 VIP，只会剩“11 月仍活跃”的用户，
 # 转化率变成已知未来的条件概率（存活偏差/未来信息泄漏）。
 final_df = final_df.copy()
 final_df['Base_User_Segment'] = final_df['User_Segment']
@@ -873,8 +829,10 @@ final_df = flag_buyer_silence(final_df, df_nov)
 
 target_potential_ids = final_df[final_df['Base_User_Segment'] == '高潜力首购用户']['user_id'].to_numpy()
 control_low_value_ids = final_df[final_df['Base_User_Segment'] == '普通浏览用户']['user_id'].to_numpy()
-target_immersive_vip_ids = final_df[final_df['Base_User_Segment'] == '高价值深度互动用户']['user_id'].to_numpy()
+target_regular_ids = final_df[final_df['Base_User_Segment'] == '常规已购用户']['user_id'].to_numpy()
 target_efficient_vip_ids = final_df[final_df['Base_User_Segment'] == '高价值直购用户']['user_id'].to_numpy()
+target_immersive_vip_ids = final_df[final_df['Base_User_Segment'] == '高价值深度互动用户']['user_id'].to_numpy()
+target_silent_ids = final_df[final_df['User_Segment'] == '高价值高摩擦用户']['user_id'].to_numpy()
 
 def evaluate_nov_performance(user_list, group_name):
     if len(user_list) == 0:
@@ -895,10 +853,12 @@ def evaluate_nov_performance(user_list, group_name):
     }
 
 groups = [
-    (target_potential_ids, "实验组-高潜力首购（10月基期口径）"),
-    (control_low_value_ids, "对照组-普通浏览（10月基期口径）"),
-    (target_immersive_vip_ids, "高价值深度互动（10月基期全量口径）"),
-    (target_efficient_vip_ids, "高价值直购（10月基期全量口径）"),
+    (target_potential_ids, "高潜力首购用户"),
+    (control_low_value_ids, "普通浏览用户"),
+    (target_regular_ids, "常规已购用户"),
+    (target_efficient_vip_ids, "高价值直购用户"),
+    (target_immersive_vip_ids, "高价值深度互动用户"),
+    (target_silent_ids, "高价值高摩擦用户（11月完全沉默，转化率应为0%）"),
 ]
 
 report = pd.DataFrame([g for g in [evaluate_nov_performance(*g) for g in groups] if g is not None])
@@ -921,61 +881,83 @@ display(HTML(report.to_html(index=False)))
   - `cvr = buyers / len(user_list)`：转化率（分母 = 事前基期人数）；
   - `rev = nov_purchases['price'].sum()`：11 月该人群贡献的营收（购买事件价格之和）；
   - `arppu = rev / buyers if buyers > 0 else 0`：**ARPPU**（每付费用户平均收入）；若无人购买则 0（避免除零）。
-- `groups`：四组的 (user_id 数组, 显示名) 列表。组名后缀"（10月基期口径）"明示口径。
+- `groups`：**六组** (user_id 数组, 显示名) 列表，全部 6 类人群都列出、不带"实验组/对照组"前缀；前五组用 `Base_User_Segment`（10 月基期标签），高价值高摩擦用户用 flag 后的 `User_Segment`（它是跨月标记，11 月转化率应为 0%）。
 - `report = pd.DataFrame([...])`：对每组调用 `evaluate_nov_performance(*g)`（`*g` 解包成两个参数），过滤掉空组（`if g is not None`），拼成 DataFrame；`display(HTML(report.to_html(index=False)))` 渲染成表格。
 
 **结果**（面板口径）：高潜力首购 13.30% vs 普通浏览 5.41%（+7.88pp）；深度互动 45.9%、直购 36.6%（事前全量口径）。
 
 ---
 
-## 未购人群基准：逻辑回归 vs 规则分层
+## 机器学习对照组：逻辑回归 vs 规则分层
 
 **Cell 30（markdown）**：
 
-> 用逻辑回归（5 折 OOF：5 折交叉验证中，每折用"没训练过该折数据"的模型做预测，避免高估）检验规则分层（手工阈值打标签）作为个体排序器的判别力，输出 AUC / 校准误差(Brier) / Top-k 购买率等关键指标。
-
-**OOF 为什么关键**：如果模型在全体数据上训练再评估自己，预测是"见过的样本"，指标会乐观偏置。5 折 OOF 把数据切 5 份，每折用其余 4 折训练、对本折预测——每个样本的预测都来自"没见过它"的模型，评估才可信。
+> ## 机器学习对照组：逻辑回归 vs 规则分层
+> 
+> 前面给用户打标签用的是**人为规则**（如"加购没买 + 高探索 → 高潜力首购"），规则讲得清但不是最优。这里训练**逻辑回归**（监督学习：用历史月份的行为特征 + "下个月有没有买"当答案，自己学规律），和规则对比：
+> 
+> - **看什么**：① **AUC** 衡量"按分数排序选人"准不准（0.5=随机，越接近 1 越好）；② 基准表里"基线 / 规则 / LR"三列购买率——同样人数下，谁挑出来的人实际购买率更高；
+> - **结果**：LR 的 AUC 和 Top-k 购买率跨月稳定高于规则 → 概率分更擅长排序选人（规则留作解释层：怎么触达、讲什么话术）。
 
 ---
 
-**Cell 31（代码）** —— 未购人群 LR 基准：
+**Cell 31（代码）** —— 机器学习对照组：滚动基准表（基线 / 规则 / LR）+ AUC 对比：
 
 ```python
-# ═══════════════════════════════════════════════════
-# 未购用户逻辑回归基准（首购增量检验）
-# 以 10 月未购用户为样本，用逻辑回归预测 11 月是否购买，
-# 与规则分层对比 AUC / 校准误差(Brier) / Top-k 购买率（5 折 OOF）。
-# ═══════════════════════════════════════════════════
-from analysis import nonbuyer_baseline
+# ── 机器学习对照组：滚动基准表（两套 LR）格式化 + 按人群拆分 ──
+def fmt_aucs(df, keep_cols):
+    out = df.copy()
+    # 基线 / 规则 / LR 三个购买率列（未购人群与已购人群各两列，另一人群的列为 NaN 显示为 —）
+    out['全体未购用户平均首购率'] = out['全体未购用户平均首购率'].map(fmt_pct)
+    out['高潜力首购用户购买率'] = out['高潜力首购用户购买率'].map(fmt_pct)
+    out['全体已购用户平均复购率'] = out['全体已购用户平均复购率'].map(fmt_pct)
+    out['高价值高摩擦用户复购率'] = out['高价值高摩擦用户复购率'].map(fmt_pct)
+    out['规则 AUC'] = out['规则 AUC'].map(lambda x: f'{x:.3f}')
+    out['LR AUC (OOF)'] = out['LR AUC (OOF)'].map(lambda x: f'{x:.3f}')
+    out['LR Top-k 率'] = out['LR Top-k 率'].map(fmt_pct)
+    return out[keep_cols]
 
-bl = nonbuyer_baseline(final_df, df_nov)
-m = bl['metrics']
-print(pd.Series({k: v for k, v in m.items() if k != 'coefficients'}).to_string())
-print('逻辑回归系数(全量拟合):')
-print(pd.Series(m['coefficients']).round(4).to_string())
+aucs1 = aucs[aucs['人群'].str.contains('未购人群')].copy()
+aucs2 = aucs[aucs['人群'].str.contains('已购人群')].copy()
+
+display(HTML('<h3>②a 未购人群：规则分层 vs 逻辑回归</h3>'))
+display(HTML('<p style="color:#555">AUC 衡量“按分数排序选人”的准确度。'
+             '以 10 月未购用户为样本预测11月首购，<b>逻辑回归的 AUC (OOF)评分 稳定高于规则分层的 AUC评分</b> '
+             '，所以逻辑回归给出的概率分比规则标签更擅长按分数排序选人（规则标签留作解释层）。</p>'))
+display(HTML(fmt_aucs(aucs1, ['训练月', '验证月', '样本', '全体未购用户平均首购率', '高潜力首购用户购买率',
+                              '规则 AUC', 'LR AUC (OOF)', 'LR Top-k 率']).to_html(index=False)))
+
+display(HTML('<h3>②b 已购人群：规则分层 vs 逻辑回归</h3>'))
+display(HTML('<p style="color:#555">以基期已购用户为样本预测验证月复购）。'
+             '<b>逻辑回归的AUC评分 (OOF) 稳定高于规则 AUC评分</b> ，所以复购概率分比沉默规则更擅长按分数排序选人。'
+             '注意：沉默规则是"流失识别器"，其复购 AUC 低于 0.5 属正常（负向指标）。</p>'))
+display(HTML(fmt_aucs(aucs2, ['训练月', '沉默月', '验证月', '样本', '全体已购用户平均复购率', '高价值高摩擦用户复购率',
+                              '规则 AUC', 'LR AUC (OOF)', 'LR Top-k 率']).to_html(index=False)))
+# ── 可视化三：LR 基准 AUC 对比 ──
+x = np.arange(len(aucs)); w = 0.36
+fig, ax = plt.subplots(figsize=(11, 4.8))
+ax.bar(x - w/2, aucs['规则 AUC'], w, label='规则分层', color='#c2c2c2')
+ax.bar(x + w/2, aucs['LR AUC (OOF)'], w, label='逻辑回归 (OOF)', color='#66b3ff')
+ax.axhline(0.5, color='gray', ls='--', lw=1, label='随机水平 = 0.5')
+labels = [f"{r['训练月']}→{r['验证月']}" + (f"\n(沉默月 {r['沉默月']})" if pd.notna(r['沉默月']) else '')
+          for _, r in aucs.iterrows()]
+ax.set_xticks(x); ax.set_xticklabels(labels, rotation=45, ha='right')
+ax.set_ylabel('AUC')
+ax.set_title('LR 基准：逻辑回归 AUC 稳定高于规则分层（均优于随机 0.5）', fontsize=13)
+ax.legend()
+plt.tight_layout()
+plt.show()
 ```
 
 **逐行/逐对象解释**：
 
-- `nonbuyer_baseline(final_df, df_nov)`（实现在 analysis.py）：
-  - 样本 = 10 月未购用户（`Purchase_Frequency == 0`，约 13.4 万）；
-  - 标签 y = 11 月是否发生购买（1/0）；
-  - 特征 = `log1p(页数/时长/会话数/加购数)` 4 维（`_nonbuyer_lr_features`）；
-  - 5 折 StratifiedKFold（分层抽样保证每折正负样本比例一致）+ `cross_val_predict(..., method='predict_proba')` 得 OOF 概率；
-  - 规则基准 = `User_Segment == '高潜力首购用户'` 二值标签；
-  - 返回 `{'metrics': {...}, 'preds': DataFrame(user_id, y, p_lr, rule)}`。
-- `bl['metrics']` 里的关键指标：
-  - `样本(未购用户)` / `11月购买率`（y 均值，约 5.7%）；
-  - `规则人群规模`（k=5408）/ `规则 Top-k 购买率`（13.30%）/ `LR Top-k 购买率`（16.31%）——**同预算对比**：都取前 5408 人，LR 圈出的首购率比规则高 3pp；
-  - `规则 AUC`（0.528）/ `LR AUC (5折OOF)`（0.673）——排序准确度，0.5=随机；
-  - `LR AUC 仅浏览特征`（x_vol，只用前 3 维浏览特征）/ `LR AUC +规则标记`（把规则二值并入特征再训）；
-  - `LR Brier (OOF)` / `规则 Brier`——**校准误差**（均方误差式的概率校准指标，越低越好）；
-  - `LR−规则 AUC 差 (bootstrap 95% CI)`——200 次有放回重采样算 AUC 差的置信区间（判差异是否显著）。
-- `print(pd.Series({k: v for k, v in m.items() if k != 'coefficients'}).to_string())`：把 metrics 打印成纵向文本（排除系数 dict）；`pd.Series(...)` 转换后 `.to_string()` 对齐显示。
-- `m['coefficients']`：全量数据重新拟合 LR 后的**系数**（`pipe.fit(x_full, y)` 后的 `coef_[0]`），说明各特征的方向与相对重要性（如加购商品数系数最大——首购意图最强信号）。注意：系数是全量拟合（解释用），评估指标一律用 OOF（评估用）——**两套口径分开**，避免用"见过样本"的系数自我表扬。
+- `fmt_aucs(df, keep_cols)`：把三个购买率列（基线 / 规则 / LR Top-k）格式化为百分比、AUC 列 3 位小数；未购人群表里已购人群的列为 NaN → `fmt_pct` 显示为 `—`。
+- `aucs1 / aucs2`：按 `人群` 列拆分未购人群（6 行）和已购人群（5 行）。**为什么基准表有"基线 / 规则 / LR"三列**：基线（全体平均率）是参照系，规则列是"手工规则圈出的人实际购买率"（未购人群 13.30% = 全体基线 5.73% 的 2.3 倍，规则本身很有区分力），LR Top-k 列是"同预算下机器选人的购买率"（16.31%）——三列并排才能看出"规则有用、机器更准"的完整结论。
+- ②a / ②b 两张表分别展示未购人群（首购）与已购人群（复购）；`规则 AUC` 列：未购人群是"高潜力首购"二值标签的 AUC（0.528，二值标签排序粒度有限），已购人群是"沉默规则"的复购 AUC（约 0.47，**负向指标**——沉默规则是流失识别器，对"复购=1"的目标低于 0.5 属正常，对 `1−y` 看是约 0.53）。
+- **可视化三（LR vs 规则 AUC）**：x 轴是每个滚动组合（标签含"训练月→验证月"，已购人群还标"沉默月"）；`axhline(0.5)` 随机水平线。**回答"直接建模 vs 手工规则谁排序更强"**：LR（蓝）稳定高于规则（灰）。
+- **结论**：LR 的 AUC 与 Top-k 购买率跨月稳定高于规则 → 概率分更擅长排序选人；规则留作解释层。注意 8.1 无泄漏补充实验显示：LR 的真实优势（+0.6pp）远小于演示口径（+3pp），规则本身非常有效且讲得清——两者是"解释层 + 排序层"的分工。
 
 ---
-
 ## 概率分 Top-k 选人（排序层）
 
 **Cell 32（markdown）**：
@@ -1002,8 +984,6 @@ from config import POOL_TOP_RATIO
 final_df = score_nonbuyers(final_df, df_nov)
 final_df = score_buyers(final_df, df_nov)
 k_rule = int((final_df['User_Segment'] == '高潜力首购用户').sum())
-m = bl['metrics']
-print(f"同预算 k={k_rule}：规则 Top-k 购买率 {m['规则 Top-k 购买率']:.2%} → LR Top-k {m['LR Top-k 购买率']:.2%}（OOF 评估）")
 print('名单新增列：未购用户 First_Purchase_Prob / First_Purchase_Rank / TopK_Flag；已购用户 Repurchase_Prob / Repurchase_Rank')
 print(f"规则圈池 + LR 池内排序：候选池（高潜力首购）{k_rule:,} 人 → TopK_Flag 标记池内前 {POOL_TOP_RATIO:.0%} "
       f"（{int((final_df['TopK_Flag'] == 1).sum()):,} 人；比例在 config.POOL_TOP_RATIO 调整，\n"
@@ -1029,8 +1009,7 @@ print('TopK_Flag=1 的未购用户数:', int(final_df['TopK_Flag'].sum()))
 
 - `score_nonbuyers(final_df, df_nov)`（analysis.py）：对未购用户全量拟合 LR（特征同上）→ 加 3 列：`First_Purchase_Prob`（首购概率，全量未购都有）、`First_Purchase_Rank`（**只在候选池内**按概率降序排名，`rank(method='min')` 并列同 rank）、`TopK_Flag`（**池内** rank ≤ k 置 1，k = ceil(池内人数 × POOL_TOP_RATIO)，默认池内前 50% = 2,704 人）。不在池内的用户（普通浏览）概率分保留、Rank/Flag 为 NaN。
 - `score_buyers(final_df, df_nov)`：对已购用户拟合复购 LR（7 维 RFM+行为特征）→ 加 `Repurchase_Prob` / `Repurchase_Rank`；排名同样只在候选池内（默认 POOL_SEGMENTS = 常规已购 + 直购 + 深度互动 + 高价值高摩擦，共 17,520 人）。未购用户保持 NaN。
-- `k_rule = int((final_df['User_Segment'] == '高潜力首购用户').sum())`：规则人群规模（5408）。注意它现在只用于 **LR 基准实验的同预算对比**（规则 Top-k vs LR Top-k 都取 5408，比较才公平）；**触达名单的 k 改用池内比例**（TopK_Flag = 池内前 50% = 2,704），两个 k 用途不同。
-- `m = bl['metrics']`：复用 Cell 31 的 OOF 指标。打印"规则 Top-k 13.30% → LR Top-k 16.31%"——**这就是"概率分比规则选人更强"的一行证据**。
+- `k_rule = int((final_df['User_Segment'] == '高潜力首购用户').sum())`：规则人群规模（5408）。注意它现在只用于**打印展示**（规则圈池的人数）；**触达名单的 k 用池内比例**（TopK_Flag = 池内前 50% = 2,704），两个 k 用途不同（规则 vs LR 的同预算对比已在"机器学习对照组"章节展示，这里不再重复计算）。
 - `top_preview`：高潜力首购人群内按首购分排名取前 10（列：user_id / E_Score / Friction / 概率分 / 排名 / TopK_Flag）。注意**此时 `User_Segment` 仍是 flag 后的标签**（高潜力首购不受 flag 影响）。
 - `vip_preview`：高价值高摩擦（= 11 月完全沉默的 VIP）人群按**复购分**排序取前 10。**为什么看复购分**：复购概率越低流失风险越高，`Repurchase_Rank` 最小的其实是复购分最高的人——这里取 `sort_values('Repurchase_Rank').head(10)` 展示的是"复购分最高"的沉默 VIP（最值得优先召回挽回的）。运营上也可取 rank 最大的（Bottom-k，流失最严重）。
 - `int(final_df['TopK_Flag'].sum())`：核对 TopK_Flag=1 的人数 = 池内前 50%（2,704），不再是规则总人数（5,408）——k 是一个比例参数，可在 config.POOL_TOP_RATIO 调整（0.3 就取池内前 30%）。
