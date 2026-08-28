@@ -20,8 +20,7 @@
 | ## 多变量相关分析 | 13–15 | 相关热力图 + 解读 |
 | # 定义指标 | 16–17 | E_Score / Friction / 价值指数定义 |
 | # 用户价值分层建模 | 18–19 | `segment_users` 两阶段分层 + 阈值 |
-| # 分层结果概览 | 20–21 | 各人群规模与平均消费图 |
-| # 分层结构透视（组内浓度占比） | 22–23 | 100% 堆叠图函数 |
+| # 分层结果概览 | 20–23 | 各人群规模与平均消费图 + 结构透视（组内浓度占比堆叠图） |
 | # 模型验证 | 24–26 | 滚动时间外验证（正式验证） |
 | ## 汇总报告：各人群 11 月转化率 | 27–28 | 四组转化率对比（事前基期口径） |
 | ## 未购人群基准：逻辑回归 vs 规则 | 29–30 | LR 5 折 OOF 基准 |
@@ -503,9 +502,9 @@ plt.show()
 
 ---
 
-# 分层结构透视（组内浓度占比）
+### 分层结构透视（组内浓度占比）
 
-**Cell 22（markdown）**：`# 分层结构透视（组内浓度占比）`（章节标题）。
+**Cell 22（markdown）**：`### 分层结构透视（组内浓度占比）`——已并入"# 分层结果概览"章节（由一级标题降为三级），作为概览的子小节（先看各人群规模/消费，再看组内结构）。
 
 ---
 
@@ -1012,23 +1011,37 @@ print('TopK_Flag=1 的未购用户数:', int(final_df['TopK_Flag'].sum()))
 
 ---
 
-**Cell 34（代码）** —— 导出运营名单：
+**Cell 34（代码）** —— 导出运营名单（全量分层名单 + 候选触达名单）：
 
 ```python
+# 防御：kernel 早于本版本启动时，analysis 模块可能是旧的（如 export_tracking 还没有 segments 参数），
+# 先重载模块再导入，确保用上最新代码
+import importlib
+import analysis as _ana
+importlib.reload(_ana)
 from analysis import export_tracking
 
-tracking = export_tracking(final_df, 'tracked_users_list_Nov.csv')
-print(f"已导出 {len(tracking):,} 名候选用户（高潜力首购 + 高价值高摩擦）至 tracked_users_list_Nov.csv")
+# 1) 全量分层名单：全部 6 类人群（运营按 User_Segment 筛选差异化策略：
+#    高潜力首购→首购激励 / 高价值高摩擦→流失召回 / 深度互动→会员运营 /
+#    常规已购→复购唤醒 / 直购→快捷复购 / 普通浏览→潜力池）
+tracking_all = export_tracking(final_df, 'user_segments_all_Nov.csv')
+print(f"已导出全量分层名单 {len(tracking_all):,} 名用户至 user_segments_all_Nov.csv")
+
+# 2) 高潜力首购 + 高价值高摩擦两类人
+tracking_cand = export_tracking(final_df, 'tracked_users_list_Nov.csv',
+                               segments=['高潜力首购用户', '高价值高摩擦用户'])
+print(f"已导出候选触达名单 {len(tracking_cand):,} 名用户（高潜力首购 + 高价值高摩擦）至 tracked_users_list_Nov.csv")
 ```
 
 **逐行/逐对象解释**：
 
-- `export_tracking(final_df, 'tracked_users_list_Nov.csv')`（analysis.py）：
-  - 筛选 `User_Segment ∈ {高潜力首购用户, 高价值高摩擦用户}`（= 未购人群要触达 + 已购人群要召回的两类人）；
+- **`importlib.reload(_ana)` + 重新 `from analysis import export_tracking`（后加的 reload 防御）**：如果 kernel 是在旧版本代码下启动的（比如 `export_tracking` 还没有 `segments` 参数），直接调用会报 `TypeError: export_tracking() got an unexpected keyword argument 'segments'`。先重载模块再导入，确保用的是磁盘上的最新代码——与队列迁移 cell 的防御写法一致。
+- `export_tracking(final_df, path)` / `export_tracking(final_df, path, segments=...)`（analysis.py）：
+  - **默认（segments=None）导出全部用户**（约 15.1 万，6 类标签都在）——全量分层名单 `user_segments_all_Nov.csv`（体积较大，不入库、可重算）；运营按 `User_Segment` 列筛选各人群，每类人群对应不同运营策略；
+  - **传 segments 时只导出指定标签**——候选触达名单 `tracked_users_list_Nov.csv`（`['高潜力首购用户', '高价值高摩擦用户']` = 未购人群要触达 + 已购人群要召回的两类人，6,792 = 5,408 + 1,384，作为 A/B 抽样框入库）；
   - 保留 10 列：`user_id, User_Segment, E_Score, Friction, Value_Index, First_Purchase_Prob, First_Purchase_Rank, TopK_Flag, Repurchase_Prob, Repurchase_Rank`——**排序层（概率分/排名） + 解释层（标签/指标）双齐全**；
   - `to_csv(..., encoding='utf-8-sig')` 带 BOM，Excel 直接打开不乱码。
-- 名单规模 6,792 = 5,408（高潜力首购）+ 1,384（沉默高价值）。
-- **用途**：这份名单是后续随机 A/B 触达实验的**抽样框**——运营按预算取 `rank ≤ 预算` 即可选人。⚠️ 注意名单的 `First_Purchase_Prob` 用了 11 月结果拟合（全量拟合，非 OOF），若用于 11 月当月触达存在泄漏；评估预期效果应以 Cell 30/22 的 OOF 指标为准，上线需滚动窗口重训重校准。
+- **用途**：全量名单供各人群差异化运营（按标签选策略）；候选名单是后续随机 A/B 触达实验的**抽样框**——运营按预算取 `rank ≤ 预算` 即可选人。⚠️ 注意名单的 `First_Purchase_Prob` 用了 11 月结果拟合（全量拟合，非 OOF），若用于 11 月当月触达存在泄漏；评估预期效果应以 OOF 指标为准，上线需滚动窗口重训重校准。
 
 ---
 
