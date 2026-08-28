@@ -351,17 +351,12 @@ plt.title('Spearman 相关矩阵（含会话数）', fontsize=14, fontweight='bo
 plt.tight_layout()
 plt.show()
 
-# ── 关键相关系数（支撑指标构建，供解读引用）──
+# ── 关键相关系数（均为 Spearman，与热力图格子数值一致）──
 import numpy as np
-_ln = lambda s: np.log1p(df[s].clip(lower=0))
-print(f'浏览三指标相关（log1p 后 Pearson，指标构建同口径）: 页数↔时长 r={_ln("Pages_Viewed").corr(_ln("Estimated_Time")):.3f} | '
-      f'页数↔会话 r={_ln("Pages_Viewed").corr(_ln("Session_Count")):.3f} | '
-      f'时长↔会话 r={_ln("Estimated_Time").corr(_ln("Session_Count")):.3f}')
-print(f'同三指标（Spearman，即热力图格子里的数值，与 log1p-Pearson 相近但口径不同）: '
-      f'页数↔时长 r={df["Pages_Viewed"].corr(df["Estimated_Time"], method="spearman"):.3f} | '
+print(f'浏览三指标相关（Spearman）: 页数↔时长 r={df["Pages_Viewed"].corr(df["Estimated_Time"], method="spearman"):.3f} | '
       f'页数↔会话 r={df["Pages_Viewed"].corr(df["Session_Count"], method="spearman"):.3f} | '
       f'时长↔会话 r={df["Estimated_Time"].corr(df["Session_Count"], method="spearman"):.3f}')
-print(f'加购 vs 浏览（log1p）: r={_ln("Cart_Products").corr(_ln("Pages_Viewed")):.3f} → Friction 是与浏览独立的意图维度')
+print(f'加购 vs 浏览（Spearman）: r={df["Cart_Products"].corr(df["Pages_Viewed"], method="spearman"):.3f} → Friction 是与浏览独立的意图维度')
 print(f'未购用户占比: {(df["Purchase_Frequency"]==0).mean():.1%} | 消费偏度 {df["Total_Spending"].skew():.1f} | '
       f'频次偏度 {df["Purchase_Frequency"].skew():.1f}')
 ```
@@ -372,16 +367,15 @@ print(f'未购用户占比: {(df["Purchase_Frequency"]==0).mean():.1%} | 消费�
 - `corr(method='spearman')`：计算 Spearman **秩相关**。**为什么不用默认的 Pearson**：Pearson 对线性关系敏感且易被极端值主导（消费偏度 50，几个大额用户就能把相关系数拉向 1）；Spearman 把数值转成排序再算相关，对长尾/单调非线性稳健。这里的长尾数据用 Spearman 更可靠。
 - `mask = np.triu(np.ones_like(corr, dtype=bool))`：构造上三角全 True 的掩码矩阵。`sns.heatmap(mask=mask, ...)` 隐藏上三角。**为什么**：相关矩阵是对称的（r(i,j)=r(j,i)），只显示下三角避免信息重复、图更清爽。
 - `sns.heatmap(...)` 参数：`annot=True` 在格子里写数值；`fmt='.2f'` 两位小数；`cmap='RdBu_r'` 蓝-红反向色带（蓝=负相关、红=正相关）；`center=0` 以 0 为色带中性点（否则默认色带会被数据范围带偏）；`square=True` 格子正方形；`linewidths=0.8` 格子间距线；`annot_kws={'fontsize': 8}` 数字字号（7×7 格子更密，字号调小）。
-- `_ln = lambda s: np.log1p(df[s].clip(lower=0))`：定义一个"log1p 变换"小函数。`clip(lower=0)` 先把负数截到 0（`Estimated_Time` 理论非负，防御性处理），`np.log1p` 即 ln(1+x)。**为什么这里也 log1p**：与指标构建口径一致——长尾变量在 log 尺度下相关更真实。
-- 打印分**两个口径**：
-  - **log1p 后 Pearson**（与指标构建同口径）：页数↔时长 0.856、页数↔会话 0.824、时长↔会话 0.592——这是解读文字引用的数字；
-  - **Spearman**（= 热力图格子里的数值）：页数↔时长 0.925、页数↔会话 0.782、时长↔会话 0.643。两个口径数值相近但不同（Spearman 只看排序，对 log1p 前后差异不敏感；log1p-Pearson 与 E_Score 构建口径一致），打印出来是为了**让 print 与热力图对得上号**，避免读者在两张图/两套数字间困惑；
-  - 两条 print 的**结论相同**：浏览三指标**高度相关**（度量同一件事"探索深度"）→ 合成一个 E_Score；加购 vs 浏览 r≈0.35 **弱相关** → Friction 是独立的"购买意图受阻"维度。
-- `import numpy as np`：cell 里重复 import 无害（幂等），保证单独运行该 cell 也能工作。
+- `import numpy as np`：`np.triu` 构造掩码需要它；重复 import 无害（幂等），保证单独运行该 cell 也能工作。
+- 打印的相关系数**统一为 Spearman 单一口径**（= 热力图格子里的数值）：
+  - 浏览三指标：页数↔时长 **0.925**、页数↔会话 **0.782**、时长↔会话 **0.643**——**高度相关**（度量同一件事"探索深度"）→ 合成一个 E_Score；
+  - 加购 vs 浏览 **0.303**——**弱相关** → Friction 是独立的"购买意图受阻"维度；
+  - **为什么只用 Spearman 一套就够了**：① Spearman 把数值换成排名，对极端值免疫（消费/频次偏度 50~60）；② 对单调变换（如 log1p）**完全不变**（排名不变）——所以"原始值的 Spearman"天然等于"log1p 后的 Spearman"，不存在"两套数字"，也就不需要 log1p-Pearson 那套了（上一版同时打印两套反而造成困惑）。
 
 ---
 
-**Cell 15（markdown）**：`### 相关分析解读：指标构建的依据`（解读 + "EDA → 后续分析的因果逻辑"对照表，把每个 EDA 发现对应到后续处理方法——复习时重点看这张表，它是整个方法论的"为什么"。注：解读引用的三指标相关系数 r≈0.86/0.82/0.59 为 log1p 后 Pearson 口径，热力图中显示的是 Spearman（0.93/0.78/0.64），两者结论一致）。
+**Cell 15（markdown）**：`### 相关分析解读：指标构建的依据`（解读 + "EDA → 后续分析的因果逻辑"对照表，把每个 EDA 发现对应到后续处理方法——复习时重点看这张表，它是整个方法论的"为什么"。开头新增 **Spearman 秩相关简介**：把数值换成排名再算相关，对极端值免疫、对单调变换（如 log1p）不变；正文相关系数统一为 Spearman 口径：浏览三指标 0.93/0.78/0.64、加购 vs 浏览 0.30、已购内部消费↔频次 0.53、频次↔近度 −0.22——与热力图格子一致）。
 
 # 定义指标
 
