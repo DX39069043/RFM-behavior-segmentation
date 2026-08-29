@@ -563,17 +563,24 @@ def _history_train_samples(panel: pd.DataFrame, score_month: str, buyer: bool,
 
     训练样本对象 = m 月用户（m < score_month），打分对象 = score_month 用户——
     模型从未见过打分对象的结果（次月购买），严格避免"偷看答案"。
-    cache：可选 dict（month → 特征表），跨打分月复用 build_features 结果（多打分月循环时大幅提速）。
+    cache：可选 dict（month → 特征表 / '_by_month' → 按月分片），跨打分月复用。
     """
-    months = sorted(panel['month'].unique())
+    if cache is not None and '_by_month' in cache:
+        by_month = cache['_by_month']
+    else:
+        # 一次性按月分片，避免对 2000 万+ 行的 panel 反复全表布尔过滤（主要耗时点）
+        by_month = {m: g for m, g in panel.groupby('month')}
+        if cache is not None:
+            cache['_by_month'] = by_month
+    months = sorted(by_month)
     X_parts, y_parts = [], []
     for m in months:
         nm = _next_month(m)
         if nm > score_month:
             break
-        ev_m = panel[panel['month'].eq(m)]
-        ev_nm = panel[panel['month'].eq(nm)]
-        if ev_m.empty or ev_nm.empty:
+        ev_m = by_month.get(m)
+        ev_nm = by_month.get(nm)
+        if ev_m is None or ev_nm is None or ev_m.empty or ev_nm.empty:
             continue
         if cache is not None and m in cache:
             feats = cache[m]
@@ -626,7 +633,13 @@ def score_nonbuyers_history(panel: pd.DataFrame, score_month: str,
     pipe = _lr_pipeline()
     pipe.fit(X_train, y_train)
 
-    ev_sc = panel[panel['month'].eq(score_month)]
+    if cache is not None and '_by_month' in cache:
+        by_month = cache['_by_month']
+    else:
+        by_month = {m: g for m, g in panel.groupby('month')}
+        if cache is not None:
+            cache['_by_month'] = by_month
+    ev_sc = by_month.get(score_month)
     if cache is not None and score_month in cache:
         feats_sc = cache[score_month]
     else:
@@ -676,7 +689,13 @@ def score_buyers_history(panel: pd.DataFrame, score_month: str,
     pipe.fit(X_train, y_train)
 
     if segmented is None:
-        ev_sc = panel[panel['month'].eq(score_month)]
+        if cache is not None and '_by_month' in cache:
+            by_month = cache['_by_month']
+        else:
+            by_month = {m: g for m, g in panel.groupby('month')}
+            if cache is not None:
+                cache['_by_month'] = by_month
+        ev_sc = by_month.get(score_month)
         if cache is not None and score_month in cache:
             feats_sc = cache[score_month]
         else:

@@ -1049,12 +1049,16 @@ print('TopK_Flag=1 的未购用户数:', int(final_df['TopK_Flag'].sum()))
 ```python
 # ═══════════════════════════════════════════════════
 # 排序有效性验证：LR Top-k 命中率 + rank 分桶单调性
-# （未购首购 / 已购流失两个视角，覆盖所有打分月份；约 5-10 分钟）
+# （未购首购 / 已购流失两个视角，覆盖所有打分月份）
+# 耗时说明：加载 7 个月面板约 2 分钟 + 计算约 1 分钟；
+# 各月特征会缓存到 data/_feats_cache/，之后运行跳过特征构建。
 # ═══════════════════════════════════════════════════
-from analysis import _next_month, load_panel, score_buyers_history, score_nonbuyers_history
+from pathlib import Path
+from analysis import _next_month, build_features, load_panel, score_buyers_history, score_nonbuyers_history
 from config import MONTHS, PANEL_FILE
 
 PANEL_COLUMNS = ['event_time', 'event_type', 'price', 'product_id', 'user_id', 'user_session', 'month']
+print('加载 7 个月面板（约 2 分钟）...')
 panel_v = load_panel(PANEL_FILE, months=MONTHS, columns=PANEL_COLUMNS)
 
 score_months = [m for m in MONTHS if m > '2019-10' and _next_month(m) in MONTHS]
@@ -1073,13 +1077,26 @@ def bucket_rates(rank_sorted_df, y_col):
         start = end
     return rates
 
-# ── 未购人群（首购视角）：LR Top-k vs 全体候选池 vs 基线 ──
+# ── 各月用户特征：磁盘缓存（首次构建约 40 秒，之后运行直接读取）──
+cache_dir = Path('data/_feats_cache')
+cache_dir.mkdir(parents=True, exist_ok=True)
 cache = {}
-nb_rows, nb_buckets = [], {}
+for m in MONTHS:
+    cf = cache_dir / f'{m}.parquet'
+    if cf.exists():
+        cache[m] = pd.read_parquet(cf)
+    else:
+        ev = panel_v[panel_v['month'].eq(m)]
+        cache[m] = build_features(ev, ev['event_time'].max())
+        cache[m].to_parquet(cf)
+
+# ── 每个打分月：一次分层，未购 + 已购共享（不再重复 segment_users）──
+nb_rows, nb_buckets, buyer_buckets = [], {}, {}
 for sm in score_months:
     nm = _next_month(sm)
     buyers_nm = set(panel_v.loc[panel_v['month'].eq(nm) & panel_v['event_type'].eq('purchase'), 'user_id'])
     out = score_nonbuyers_history(panel_v, sm, cache=cache)
+    out = score_buyers_history(panel_v, sm, cache=cache, segmented=out)   # 复用同一分层
     nb = out[out['Purchase_Frequency'].eq(0)].copy()
     nb['bought'] = nb['user_id'].isin(buyers_nm).astype(int)
     pool = nb[nb['User_Segment'] == '高潜力首购用户'].copy()
@@ -1089,6 +1106,11 @@ for sm in score_months:
                     'LR Top-k': top['bought'].mean() if len(top) else np.nan,
                     'Top-k人数': len(top)})
     nb_buckets[sm] = bucket_rates(pool.sort_values('First_Purchase_Rank'), 'bought')
+    b = out[out['Purchase_Frequency'].gt(0)].copy()
+    b['bought'] = b['user_id'].isin(buyers_nm).astype(int)
+    buyer_buckets[sm] = bucket_rates(b[b['Repurchase_Rank'].notna()].sort_values('Repurchase_Rank'), 'bought')
+    print(f'  {sm} 完成（→{nm} 结果）')
+
 nb_df = pd.DataFrame(nb_rows)
 nb_df['Top-k提升(pp)'] = (nb_df['LR Top-k'] - nb_df['全体候选池']) * 100
 nb_show = nb_df.copy()
@@ -1098,16 +1120,6 @@ nb_show['Top-k提升(pp)'] = nb_show['Top-k提升(pp)'].map(lambda x: '—' if p
 display(HTML('<h3>未购人群（首购视角）：LR Top-k vs 全体候选池 vs 基线（逐月时间外验证）</h3>'))
 display(HTML(nb_show.to_html(index=False)))
 
-# ── 已购人群（复购/流失视角）：复购分 rank 分桶的次月购买率 ──
-buyer_buckets = {}
-for sm in score_months:
-    nm = _next_month(sm)
-    buyers_nm = set(panel_v.loc[panel_v['month'].eq(nm) & panel_v['event_type'].eq('purchase'), 'user_id'])
-    out = score_buyers_history(panel_v, sm, cache=cache)
-    b = out[out['Purchase_Frequency'].gt(0)].copy()
-    b['bought'] = b['user_id'].isin(buyers_nm).astype(int)
-    pool = b[b['Repurchase_Rank'].notna()].copy()   # 候选池内（规则认可人群）
-    buyer_buckets[sm] = bucket_rates(pool.sort_values('Repurchase_Rank'), 'bought')
 print('已购人群（复购/流失视角）——复购分 rank 分桶的次月购买率（越靠前越高，后50%≈流失预警）：')
 for sm, rates in buyer_buckets.items():
     print(f'  {sm}→{_next_month(sm)}: ' + ' | '.join(f'{b[2]} {r:.2%}' for b, r in zip(BUCKETS, rates)))
@@ -1138,7 +1150,7 @@ plt.show()
 - `bucket_rates(rank_sorted_df, y_col)`：按概率分 rank 升序排序后，按人数比例切 4 桶（前 10% / 10-25% / 25-50% / 后 50%），返回各桶次月购买率。
 - **未购（首购视角）**：每个打分月算三列——基线（全体未购）、全体候选池（高潜力首购）、LR Top-k（池内前 50%），以及 Top-k 相对候选池的提升（pp）。预期：**Top-k > 全体候选池 > 基线**，且提升跨月稳定为正。
 - **已购（复购/流失视角）**：复购分 rank 分桶的次月购买率——分越高次月越可能复购（Top 适合复购运营），**后 50% 购买率显著低 = 流失预警对象**（与"跨月沉默=流失"的规则互为印证）。
-- `cache = {}` 传给 history 打分：跨打分月复用 `build_features` 结果，把 40+ 次重复构建降到 7 次（分钟级跑完）。
+- **性能优化**：① 各月用户特征**磁盘缓存**到 `data/_feats_cache/`（首次构建约 40 秒，之后运行直接读取、跳过特征构建）；② 每个打分月只做一次分层（`score_buyers_history(..., segmented=out)` 复用未购打分的同一分层，不再重复 `segment_users`）；③ 打印每个打分月的进度。总耗时 ≈ 加载 7 个月面板约 3 分钟（必要 IO）+ 计算约 1 分钟。
 - 分桶单调性图：两条线（未购/已购）× 每个打分月一条折线，x 轴为 4 个分位桶——**所有折线都应向右下倾斜**。
 - **结论（以 11 月为例）**：LR Top-k 12 月购买率 17.44% > 全体候选池 14.02%（+3.4pp）> 基线 5.70%；分桶 22.6% → 17.6% → 15.3% → 10.6% 严格单调——LR 概率分确实在给"次月会不会买"排序。
 
