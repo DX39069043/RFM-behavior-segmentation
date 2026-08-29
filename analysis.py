@@ -557,11 +557,13 @@ def _next_month(m: str) -> str:
     return f'{y + 1:04d}-01' if mo == 12 else f'{y:04d}-{mo + 1:02d}'
 
 
-def _history_train_samples(panel: pd.DataFrame, score_month: str, buyer: bool):
+def _history_train_samples(panel: pd.DataFrame, score_month: str, buyer: bool,
+                           cache: dict | None = None):
     """构建打分月之前的所有 (特征月 → 次月标签) 训练样本（未购/已购人群），返回 (X, y)。
 
     训练样本对象 = m 月用户（m < score_month），打分对象 = score_month 用户——
     模型从未见过打分对象的结果（次月购买），严格避免"偷看答案"。
+    cache：可选 dict（month → 特征表），跨打分月复用 build_features 结果（多打分月循环时大幅提速）。
     """
     months = sorted(panel['month'].unique())
     X_parts, y_parts = [], []
@@ -573,7 +575,12 @@ def _history_train_samples(panel: pd.DataFrame, score_month: str, buyer: bool):
         ev_nm = panel[panel['month'].eq(nm)]
         if ev_m.empty or ev_nm.empty:
             continue
-        feats = build_features(ev_m, ev_m['event_time'].max())
+        if cache is not None and m in cache:
+            feats = cache[m]
+        else:
+            feats = build_features(ev_m, ev_m['event_time'].max())
+            if cache is not None:
+                cache[m] = feats
         buyers_nm = set(ev_nm.loc[ev_nm['event_type'].eq('purchase'), 'user_id'])
         if buyer:
             sub = feats[feats['Purchase_Frequency'].gt(0)].copy()
@@ -594,7 +601,8 @@ def _history_train_samples(panel: pd.DataFrame, score_month: str, buyer: bool):
 
 def score_nonbuyers_history(panel: pd.DataFrame, score_month: str,
                             pool_segments: list | None = None,
-                            top_ratio: float | None = None) -> pd.DataFrame:
+                            top_ratio: float | None = None,
+                            cache: dict | None = None) -> pd.DataFrame:
     """
     LR 历史窗口打分（未购人群，严格无泄漏）——替代 score_nonbuyers 的演示版全量拟合。
 
@@ -608,17 +616,23 @@ def score_nonbuyers_history(panel: pd.DataFrame, score_month: str,
     ⚠️ 备注：**10 月无法给出概率分**——10 月是最早的建模/EDA 月，没有
     更早月份的历史行为可用于训练；10 月本身也不需要选人。打分最早从
     11 月开始（用 10 月特征 + 11 月标签训练）。
+    cache：可选 dict（month → 特征表），跨打分月复用 build_features 结果。
     """
     if pool_segments is None:
         pool_segments = POOL_SEGMENTS
     if top_ratio is None:
         top_ratio = POOL_TOP_RATIO
-    X_train, y_train = _history_train_samples(panel, score_month, buyer=False)
+    X_train, y_train = _history_train_samples(panel, score_month, buyer=False, cache=cache)
     pipe = _lr_pipeline()
     pipe.fit(X_train, y_train)
 
     ev_sc = panel[panel['month'].eq(score_month)]
-    feats_sc = build_features(ev_sc, ev_sc['event_time'].max())
+    if cache is not None and score_month in cache:
+        feats_sc = cache[score_month]
+    else:
+        feats_sc = build_features(ev_sc, ev_sc['event_time'].max())
+        if cache is not None:
+            cache[score_month] = feats_sc
     seg_sc, _ = segment_users(feats_sc)
     out = seg_sc.copy()
     nb_mask = out['Purchase_Frequency'].eq(0)
@@ -643,7 +657,8 @@ def score_nonbuyers_history(panel: pd.DataFrame, score_month: str,
 
 def score_buyers_history(panel: pd.DataFrame, score_month: str,
                          pool_segments: list | None = None,
-                         segmented: pd.DataFrame | None = None) -> pd.DataFrame:
+                         segmented: pd.DataFrame | None = None,
+                         cache: dict | None = None) -> pd.DataFrame:
     """
     LR 历史窗口打分（已购人群，严格无泄漏）——替代 score_buyers 的演示版全量拟合。
 
@@ -651,17 +666,23 @@ def score_buyers_history(panel: pd.DataFrame, score_month: str,
     (特征月 → 次月复购标签) 已购样本；打分 = score_month 已购用户，池内排名）。
     segmented：可选——传入 score_nonbuyers_history 的结果可在其上叠加复购分列
     （否则内部重新对 score_month 分层）。
+    cache：可选 dict（month → 特征表），跨打分月复用 build_features 结果。
     ⚠️ 备注：10 月无法给出概率分（无更早训练数据；10 月为建模月不需要选人）。
     """
     if pool_segments is None:
         pool_segments = POOL_SEGMENTS
-    X_train, y_train = _history_train_samples(panel, score_month, buyer=True)
+    X_train, y_train = _history_train_samples(panel, score_month, buyer=True, cache=cache)
     pipe = _lr_pipeline()
     pipe.fit(X_train, y_train)
 
     if segmented is None:
         ev_sc = panel[panel['month'].eq(score_month)]
-        feats_sc = build_features(ev_sc, ev_sc['event_time'].max())
+        if cache is not None and score_month in cache:
+            feats_sc = cache[score_month]
+        else:
+            feats_sc = build_features(ev_sc, ev_sc['event_time'].max())
+            if cache is not None:
+                cache[score_month] = feats_sc
         seg_sc, _ = segment_users(feats_sc)
         out = seg_sc.copy()
     else:

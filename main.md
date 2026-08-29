@@ -24,9 +24,9 @@
 | # 模型验证 | 24–27 | 滚动时间外验证（正式验证）+ 无泄漏补充实验 |
 | ## 汇总报告：各人群 11 月转化率 | 28–29 | 四组转化率对比（事前基期口径） |
 | ## 机器学习对照组：逻辑回归 vs 规则 | 30–31 | 滚动基准表（基线/规则/LR）+ AUC 对比 |
-| ## 概率分 Top-k 选人（排序层） | 32–33 | 首购分 / 复购分 + 预览 |
-| ## 结果持久化 | 34–35 | 导出运营名单 CSV |
-| ## 标签迁移分析 | 36–39 | 队列迁移（冻结阈值）+ 解读 + 构成图 |
+| ## 概率分 Top-k 选人（排序层） | 32–35 | 首购分 / 复购分 + 排序有效性验证 |
+| ## 结果持久化 | 36–37 | 导出运营名单 CSV |
+| ## 标签迁移分析 | 38–41 | 队列迁移（冻结阈值）+ 解读 + 构成图 |
 
 ---
 
@@ -1030,11 +1030,124 @@ print('TopK_Flag=1 的未购用户数:', int(final_df['TopK_Flag'].sum()))
 
 ## 结果持久化
 
-**Cell 34（markdown）**：`## 结果持久化`（小节标题）。
+**Cell 34（markdown）** —— 排序有效性验证说明：
+
+> ### 排序有效性验证：LR 挑出的 Top 靠谱吗？
+> 
+> 以 11 月高潜力首购为例：LR 池内前 50%（8,806 人）的 12 月购买率 **17.44%**，
+> 高于全体候选池（17,612 人）的 14.02%（+3.4pp）、是全体未购基线 5.70% 的 3 倍；
+> 且按 rank 分桶购买率**严格单调下降**（前 10% 22.6% → 后 50% 10.6%）。
+> 
+> 下面把这个验证**推广到所有打分月份（11~3 月，10 月无法打分）**，并覆盖
+> **已购人群的流失视角**（复购分排序：分越高次月越可能复购、分越低流失风险越高）。
+> 全部为时间外验证（打分月特征 + 次月购买结果，训练严格早于打分月，无泄漏）。
 
 ---
 
-**Cell 35（代码）** —— 导出运营名单（全量分层名单 + 候选触达名单）：
+**Cell 35（代码）** —— 排序有效性验证：LR Top-k 命中率 + rank 分桶单调性：
+
+```python
+# ═══════════════════════════════════════════════════
+# 排序有效性验证：LR Top-k 命中率 + rank 分桶单调性
+# （未购首购 / 已购流失两个视角，覆盖所有打分月份；约 5-10 分钟）
+# ═══════════════════════════════════════════════════
+from analysis import _next_month, load_panel, score_buyers_history, score_nonbuyers_history
+from config import MONTHS, PANEL_FILE
+
+PANEL_COLUMNS = ['event_time', 'event_type', 'price', 'product_id', 'user_id', 'user_session', 'month']
+panel_v = load_panel(PANEL_FILE, months=MONTHS, columns=PANEL_COLUMNS)
+
+score_months = [m for m in MONTHS if m > '2019-10' and _next_month(m) in MONTHS]
+              # 10 月无法打分（最早建模月，不需要选人）；且打分月的次月（结果月）必须在面板内
+BUCKETS = [(0.0, 0.10, '前10%'), (0.10, 0.25, '10-25%'), (0.25, 0.50, '25-50%'), (0.50, 1.0, '后50%')]
+
+def bucket_rates(rank_sorted_df, y_col):
+    """按 rank 升序排序后按人数比例切 4 桶，返回各桶 y 均值（越靠前越高 = 排序有效）。"""
+    n = len(rank_sorted_df)
+    if n == 0:
+        return [np.nan] * len(BUCKETS)
+    rates, start = [], 0
+    for lo, hi, _ in BUCKETS:
+        end = int(np.ceil(hi * n))
+        rates.append(rank_sorted_df.iloc[start:end][y_col].mean())
+        start = end
+    return rates
+
+# ── 未购人群（首购视角）：LR Top-k vs 全体候选池 vs 基线 ──
+cache = {}
+nb_rows, nb_buckets = [], {}
+for sm in score_months:
+    nm = _next_month(sm)
+    buyers_nm = set(panel_v.loc[panel_v['month'].eq(nm) & panel_v['event_type'].eq('purchase'), 'user_id'])
+    out = score_nonbuyers_history(panel_v, sm, cache=cache)
+    nb = out[out['Purchase_Frequency'].eq(0)].copy()
+    nb['bought'] = nb['user_id'].isin(buyers_nm).astype(int)
+    pool = nb[nb['User_Segment'] == '高潜力首购用户'].copy()
+    top = pool[pool['TopK_Flag'] == 1]
+    nb_rows.append({'打分月': sm, '结果月': nm, '池内人数': len(pool),
+                    '基线(全体未购)': nb['bought'].mean(), '全体候选池': pool['bought'].mean(),
+                    'LR Top-k': top['bought'].mean() if len(top) else np.nan,
+                    'Top-k人数': len(top)})
+    nb_buckets[sm] = bucket_rates(pool.sort_values('First_Purchase_Rank'), 'bought')
+nb_df = pd.DataFrame(nb_rows)
+nb_df['Top-k提升(pp)'] = (nb_df['LR Top-k'] - nb_df['全体候选池']) * 100
+nb_show = nb_df.copy()
+for c in ['基线(全体未购)', '全体候选池', 'LR Top-k']:
+    nb_show[c] = nb_show[c].map(lambda x: '—' if pd.isna(x) else f'{x:.2%}')
+nb_show['Top-k提升(pp)'] = nb_show['Top-k提升(pp)'].map(lambda x: '—' if pd.isna(x) else f'{x:+.2f}')
+display(HTML('<h3>未购人群（首购视角）：LR Top-k vs 全体候选池 vs 基线（逐月时间外验证）</h3>'))
+display(HTML(nb_show.to_html(index=False)))
+
+# ── 已购人群（复购/流失视角）：复购分 rank 分桶的次月购买率 ──
+buyer_buckets = {}
+for sm in score_months:
+    nm = _next_month(sm)
+    buyers_nm = set(panel_v.loc[panel_v['month'].eq(nm) & panel_v['event_type'].eq('purchase'), 'user_id'])
+    out = score_buyers_history(panel_v, sm, cache=cache)
+    b = out[out['Purchase_Frequency'].gt(0)].copy()
+    b['bought'] = b['user_id'].isin(buyers_nm).astype(int)
+    pool = b[b['Repurchase_Rank'].notna()].copy()   # 候选池内（规则认可人群）
+    buyer_buckets[sm] = bucket_rates(pool.sort_values('Repurchase_Rank'), 'bought')
+print('已购人群（复购/流失视角）——复购分 rank 分桶的次月购买率（越靠前越高，后50%≈流失预警）：')
+for sm, rates in buyer_buckets.items():
+    print(f'  {sm}→{_next_month(sm)}: ' + ' | '.join(f'{b[2]} {r:.2%}' for b, r in zip(BUCKETS, rates)))
+
+# ── 分桶单调性图（未购 + 已购）──
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+x = np.arange(len(BUCKETS))
+for ax, data, title in [
+    (axes[0], nb_buckets, '未购：首购概率分 rank 分桶 → 次月购买率'),
+    (axes[1], buyer_buckets, '已购：复购概率分 rank 分桶 → 次月购买率')]:
+    for sm, rates in data.items():
+        ax.plot(x, np.array(rates) * 100, marker='o', label=sm)
+    ax.set_xticks(x); ax.set_xticklabels([b[2] for b in BUCKETS])
+    ax.set_ylabel('次月购买率 (%)')
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+plt.suptitle('rank 分桶单调性：分越靠前次月购买率越高 = LR 排序有效（10 月无法打分，最早 11 月）',
+             fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.show()
+```
+
+**逐行/逐对象解释**：
+
+- **验证目的**：证明"LR 池内排序靠谱"——池内前 top_ratio 的人，次月购买率应高于全体候选池；且 rank 分桶购买率应**严格单调下降**（分越靠前命中率越高），否则说明概率分是瞎排的。
+- `score_months = [m for m in MONTHS if m > '2019-10']`：**覆盖所有打分月份（11~3 月）**——10 月无法打分（最早建模月无更早历史，且不需要选人）。
+- `bucket_rates(rank_sorted_df, y_col)`：按概率分 rank 升序排序后，按人数比例切 4 桶（前 10% / 10-25% / 25-50% / 后 50%），返回各桶次月购买率。
+- **未购（首购视角）**：每个打分月算三列——基线（全体未购）、全体候选池（高潜力首购）、LR Top-k（池内前 50%），以及 Top-k 相对候选池的提升（pp）。预期：**Top-k > 全体候选池 > 基线**，且提升跨月稳定为正。
+- **已购（复购/流失视角）**：复购分 rank 分桶的次月购买率——分越高次月越可能复购（Top 适合复购运营），**后 50% 购买率显著低 = 流失预警对象**（与"跨月沉默=流失"的规则互为印证）。
+- `cache = {}` 传给 history 打分：跨打分月复用 `build_features` 结果，把 40+ 次重复构建降到 7 次（分钟级跑完）。
+- 分桶单调性图：两条线（未购/已购）× 每个打分月一条折线，x 轴为 4 个分位桶——**所有折线都应向右下倾斜**。
+- **结论（以 11 月为例）**：LR Top-k 12 月购买率 17.44% > 全体候选池 14.02%（+3.4pp）> 基线 5.70%；分桶 22.6% → 17.6% → 15.3% → 10.6% 严格单调——LR 概率分确实在给"次月会不会买"排序。
+
+---
+**Cell 36（markdown）**：`## 结果持久化`（小节标题）。
+
+---
+
+**Cell 37（代码）** —— 导出运营名单（全量分层名单 + 候选触达名单）：
 
 ```python
 # 防御：kernel 早于本版本启动时，analysis 模块可能是旧的（如 export_tracking 还没有 segments 参数），
@@ -1071,7 +1184,7 @@ print(f"已导出候选触达名单 {len(tracking_cand):,} 名用户（11月高�
 
 ## 标签迁移分析
 
-**Cell 36（markdown）**：
+**Cell 38（markdown）**：
 
 > 固定基期月（2019-10）分层后，逐月追踪**同一批用户**（队列：固定 10 月那批用户，看他们后续月的标签变化；7 个月用户面板，5% 抽样约 78 万用户），用**冻结的 10 月阈值**（固定沿用 10 月拟合的切分线，不让每月重算）重算后续月标签——高价值直购 / 深度互动 / 常规已购 是保持、降级、升级还是沉默？
 >
@@ -1084,7 +1197,7 @@ print(f"已导出候选触达名单 {len(tracking_cand):,} 名用户（11月高�
 
 ---
 
-**Cell 37（代码）** —— 读取队列迁移结果：
+**Cell 39（代码）** —— 读取队列迁移结果：
 
 ```python
 # ═══════════════════════════════════════════════════
@@ -1115,11 +1228,11 @@ LABELS_ORDER = ['普通浏览用户', '高潜力首购用户', '常规已购用�
 - `OUTPUT_COHORT_LABELS`：`cohort_frozen_labels.csv` 路径（config.py 集中管理）。
 - 文件存在性检查：缺失时 `SystemExit` 提示运行 `run_cohort.py`（结果默认入库，clone 可直接读）。
 - `fl`：冻结标签表，结构 = `基期标签 × month × 各冻结标签占比列`（如"常规已购用户 / 2019-11 / 常规已购 16.2% / 无任何活动 40.5% / ..."）。由 `run_cohort.py` → `analysis.cohort_migration` 生成：固定 10 月基期分层 → 逐月用冻结阈值重算同一批用户标签 → 行内归一占比。
-- `LABELS_ORDER`：6 个标签的展示顺序常量（供 Cell 39 图表排序）。
+- `LABELS_ORDER`：6 个标签的展示顺序常量（供 Cell 41 图表排序）。
 
 ---
 
-**Cell 38（markdown）** —— 解读（数字已按最新冻结标准化产物同步）：
+**Cell 40（markdown）** —— 解读（数字已按最新冻结标准化产物同步）：
 
 > **① 标签保持率**（10 月各标签队列在后续月仍保持原标签的比例，越高 = 越稳定）：
 >
@@ -1153,7 +1266,7 @@ LABELS_ORDER = ['普通浏览用户', '高潜力首购用户', '常规已购用�
 
 ---
 
-**Cell 39（代码）** —— 各标签逐月构成堆叠图：
+**Cell 41（代码）** —— 各标签逐月构成堆叠图：
 
 ```python
 # ═══════════════════════════════════════════════════
