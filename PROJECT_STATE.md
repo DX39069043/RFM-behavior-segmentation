@@ -1,8 +1,8 @@
-﻿# 项目状态速览 · UserValue&Potential
+# 项目状态速览 · UserValue&Potential
 
 > 本文档是"上下文接力"用的压缩摘要。新开会话时，让助手先读本文件即可无缝继续。
-> 目录：`D:\Code\RFM_Optimize\old_project\RFM-behavior-segmentation`
-> 状态：**"跨月沉默" + 队列迁移分析（冻结阈值）均已落地，数据源统一为 7 个月面板**；分析主线见 Notebook（39 cells，EDA 章节含单变量分布可视化、偏度量化与解读）。
+> 目录：`D:\Code\RFM_Optimize`（本项目根目录；旧目录 `old_project\RFM-behavior-segmentation` 已不存在）
+> 状态：**"跨月沉默" + 队列迁移分析（冻结阈值）均已落地，数据源统一为 7 个月面板**；分析主线见 Notebook（42 cells，EDA 含单变量分布可视化、偏度量化与解读；模型验证含机器学习对照组与排序有效性验证）。
 
 ## 一、项目一句话
 
@@ -26,7 +26,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `main.ipynb` | 分析入口（33 cells）：EDA → 特征 → 分层 → 结构透视 → **滚动验证（正式验证，模型验证章节第一节）** → 汇总 → 未购人群基准 → 概率分选人 → 名单 → 队列迁移分析（含解读 markdown + 逐月转化去向图） |
+| `main.ipynb` | 分析入口（42 cells）：EDA → 特征 → 分层 → 结构透视 → **滚动验证（实验一/二）** → 无泄漏补充实验 → 汇总（六类人群转化率） → 机器学习对照组（实验三） → 概率分选人（历史窗口打分 + 排序有效性验证） → 名单 → 队列迁移分析 |
 | `analysis.py` | 函数库：指标/分层（支持冻结阈值）/跨月沉默/检验/LR 基准/打分/滚动验证/`cohort_migration` |
 | `config.py` | 集中配置（路径、MONTHS、BASE_MONTH、PANEL_FILE、随机种子） |
 | `run_rolling.py` | 滚动验证入口 → 两张 CSV |

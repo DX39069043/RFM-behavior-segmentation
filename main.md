@@ -1186,11 +1186,11 @@ print(f"已导出候选触达名单 {len(tracking_cand):,} 名用户（11月高�
 
 - **`importlib.reload(_ana)` + 重新 `from analysis import export_tracking`（后加的 reload 防御）**：如果 kernel 是在旧版本代码下启动的（比如 `export_tracking` 还没有 `segments` 参数），直接调用会报 `TypeError: export_tracking() got an unexpected keyword argument 'segments'`。先重载模块再导入，确保用的是磁盘上的最新代码——与队列迁移 cell 的防御写法一致。
 - `export_tracking(final_df, path)` / `export_tracking(final_df, path, segments=...)`（analysis.py）：
-  - **默认（segments=None）导出全部用户**（约 15.1 万，6 类标签都在）——全量分层名单 `user_segments_all_Nov.csv`（体积较大，不入库、可重算）；运营按 `User_Segment` 列筛选各人群，每类人群对应不同运营策略；
-  - **传 segments 时只导出指定标签**——候选触达名单 `tracked_users_list_Nov.csv`（`['高潜力首购用户', '高价值高摩擦用户']` = 未购人群要触达 + 已购人群要召回的两类人，6,792 = 5,408 + 1,384，作为 A/B 抽样框入库）；
+  - **默认（segments=None）导出全部用户**（11 月活跃用户 18.5 万，5 类标签——11 月打分名单无"高价值高摩擦"，跨月沉默是事后标记）——全量分层名单 `user_segments_all_Nov.csv`（体积较大，不入库、可重算）；运营按 `User_Segment` 列筛选各人群，每类人群对应不同运营策略；
+  - **传 segments 时只导出指定标签**——候选触达名单 `tracked_users_list_Nov.csv`（`['高潜力首购用户']` = 11 月高潜力首购 17,612 人，其中 LR 池内前 50% 的 `TopK_Flag=1` 8,806 人优先触达；跨月沉默高价值的召回名单需在观察月后按月刷新，天然滞后一个月）；
   - 保留 10 列：`user_id, User_Segment, E_Score, Friction, Value_Index, First_Purchase_Prob, First_Purchase_Rank, TopK_Flag, Repurchase_Prob, Repurchase_Rank`——**排序层（概率分/排名） + 解释层（标签/指标）双齐全**；
   - `to_csv(..., encoding='utf-8-sig')` 带 BOM，Excel 直接打开不乱码。
-- **用途**：全量名单供各人群差异化运营（按标签选策略）；候选名单是后续随机 A/B 触达实验的**抽样框**——运营按预算取 `rank ≤ 预算` 即可选人。⚠️ 注意名单的 `First_Purchase_Prob` 用了 11 月结果拟合（全量拟合，非 OOF），若用于 11 月当月触达存在泄漏；评估预期效果应以 OOF 指标为准，上线需滚动窗口重训重校准。
+- **用途**：全量名单供各人群差异化运营（按标签选策略）；候选名单是后续随机 A/B 触达实验的**抽样框**——运营按预算取 `rank ≤ 预算` 即可选人。⚠️ 概率分来自 `score_nonbuyers_history`（历史窗口训练，无泄漏），评估预期效果以排序有效性验证/机器学习对照组的 OOF 指标为准，上线需滚动重训练。
 
 ---
 
@@ -1367,7 +1367,7 @@ plt.show()
    → flag_buyer_silence 跨月沉默标记（流失判定）
    → 滚动时间外验证（实验一 +7.88pp / 实验二 −19.9~−31.8pp，跨月稳定）
    → LR 基准（OOF：AUC 0.528→0.673）+ 概率分 Top-k 选人（13.30%→16.31%）
-   → tracked_users_list_Nov.csv（6,792 人 = 5,408 高潜力首购 + 1,384 沉默高价值）
+   → tracked_users_list_Nov.csv（11 月高潜力首购 17,612 人，TopK_Flag=1 前 50% 8,806 人优先触达）
    → 队列迁移分析（冻结阈值 + 冻结 E_Score 标准化：保持率 10.9%~18.8% → 1.8%~6.1%，按月刷新名单）
 ```
 
