@@ -64,6 +64,7 @@ def compute_engagement_metrics(df: pd.DataFrame, scalers: dict | None = None) ->
     （滚动验证等逐月独立建模场景）；传入时用既有标准化器 transform
     （队列迁移分析冻结 E_Score 的标准化参数，保证跨月可比）。
     """
+
     # 在副本上操作，避免污染调用方的 DataFrame
     out = df.copy()
     # 参与 E_Score 的三个探索度原始指标列
@@ -95,8 +96,10 @@ def compute_engagement_metrics(df: pd.DataFrame, scalers: dict | None = None) ->
     return out
 
 
-def build_features(events: pd.DataFrame, observation_end: pd.Timestamp,
-                   scalers: dict | None = None, return_scalers: bool = False):
+def build_features(events: pd.DataFrame,
+                   observation_end: pd.Timestamp,
+                   scalers: dict | None = None,
+                   return_scalers: bool = False):
     """按会话计算有效停留时长，聚合为用户特征（含加购/购买的去重商品数）。
 
     scalers / return_scalers：E_Score 标准化器的冻结复用（队列迁移分析用）。
