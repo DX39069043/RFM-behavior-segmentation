@@ -1,13 +1,3 @@
-"""用户分层与针对性营销（Segments & Targeting）分析函数库。
-
-核心产出：六类可解释用户标签——普通浏览 / 高潜力首购 / 常规已购 / 高价值直购 /
-高价值深度互动 / 高价值高摩擦（跨月沉默），支撑对不同人群的差异化营销策略
-（潜力培育 / 首购激励与购物车挽回 / 复购唤醒 / 快捷复购 / 会员运营 / 流失召回）。
-方法主线：未购用户 → 首购潜力识别（探索度 + 加购未买 + 首购概率分）；
-已购用户 → 价值分层与复购概率分（RFM 特征 + 复购基准）。
-指标构建 → 特征聚合 → GMM 阈值分层 → 时间外验证检验 → 逻辑回归基准 → 概率分 Top-k 选人 → 名单导出。
-数据分析工作流（数据加载、EDA 与可视化）在 main.ipynb 中组织。
-"""
 
 from __future__ import annotations
 
@@ -24,53 +14,45 @@ from config import (BOOTSTRAP_N, CV_FOLDS, DEDUPE_EVENTS, LR_MAX_ITER,
                     RANDOM_STATE, SESSION_GAP_SECONDS)
 
 
-def fit_engagement_scalers(df: pd.DataFrame) -> dict:
-    """拟合 E_Score 三个分量（log1p 后）的 Z 标准化器，供基期冻结复用。
+def F_and_E_scalers(df: pd.DataFrame) -> dict:
 
-    队列迁移分析中，若每月对 E_Score 重新标准化，"冻结阈值"就只冻结了
-    阈值数值、没冻结"尺子"本身——同用户跨月 E_Score 不可严格比较。
-    基期拟合一次、后续月 transform 可保证跨月可比。
-    """
-    # 需要做 Z 标准化的三个探索度原始指标列
+
     cols = ['Pages_Viewed', 'Estimated_Time', 'Session_Count']
-    # 空字典，最后返回"列名 -> 已拟合好的标准化器"
+
     scalers_dict = {}
     # 逐个指标单独拟合一个标准化器
     for col in cols:
-        # 1. 取出该指标整列数据
         data_series = df[col]
-        # 2. 裁剪：把所有小于 0 的值改为 0（确保后续对数变换不会出现负数）
+        # 把所有小于 0 的值改为 0
         data_clipped = data_series.clip(lower=0)
-        # 3. 对数变换 log(1+x)：压缩大数值，缓解长尾分布对标准差的拉扯
+        # 对数变换 log(1+x)
         data_logged = np.log1p(data_clipped)
-        # 4. 转成 NumPy 数组并重塑为列向量 (行数, 1)：sklearn 要求二维输入
+        # 转成 NumPy 数组并重塑为列向量 (行数, 1)：sklearn 要求二维输入
         data_reshaped = data_logged.to_numpy().reshape(-1, 1)
-        # 5. 新建 StandardScaler 并拟合（记录该列的均值与标准差）
+        # 新建 StandardScaler 并拟合
         scaler = StandardScaler()
         scaler.fit(data_reshaped)
-        # 6. 把拟合好的标准化器存进字典
+        # 把拟合好的标准化器存进字典
         scalers_dict[col] = scaler
     # 返回"列名 -> 标准化器"的映射
     return scalers_dict
 
 
-def compute_engagement_metrics(df: pd.DataFrame, scalers: dict | None = None) -> pd.DataFrame:
+def Friction_and_Exploration(df: pd.DataFrame, scalers: dict | None = None) -> pd.DataFrame:
     """
     构建探索度与摩擦指标，指标定义保持业务可解释。
 
-    E_Score: 浏览页数、有效停留时长、会话数的对数标准化均值。
+    Exploration: 浏览页数、有效停留时长、会话数的对数标准化均值。
     Friction: 加购但未购买的去重商品数（Cart_Products - Purchased_Products，截断≥0），
               度量“加购了却没买”的购买意图受阻（未购人群首购潜力识别用）。
     已购人群的“高摩擦”不在此定义——它指跨月完全沉默（见 flag_buyer_silence）。
 
     scalers：可选 dict（见 fit_engagement_scalers）。为 None 时当月重新拟合
-    （滚动验证等逐月独立建模场景）；传入时用既有标准化器 transform
-    （队列迁移分析冻结 E_Score 的标准化参数，保证跨月可比）。
     """
 
     # 在副本上操作，避免污染调用方的 DataFrame
     out = df.copy()
-    # 参与 E_Score 的三个探索度原始指标列
+    # 参与 Exploration 的三个探索度原始指标列
     cols = ['Pages_Viewed', 'Estimated_Time', 'Session_Count']
     # z：依次存放三个指标标准化后的列（每列长度均为行数）
     z = []
@@ -89,8 +71,9 @@ def compute_engagement_metrics(df: pd.DataFrame, scalers: dict | None = None) ->
             standardized = scalers[col].transform(col_values)
         # ravel() 把列向量展平成一维，方便最后按行求均值
         z.append(standardized.ravel())
-    # E_Score = 三个标准化分量的逐行均值（探索度综合分）
-    out['E_Score'] = np.mean(z, axis=0)
+    # Exploration = 三个标准化分量的逐行均值（探索度综合分）
+    out['Exploration'] = np.mean(z, axis=0)
+
     # Friction = 加购去重商品数 - 购买去重商品数（"加购了却没买"的意图受阻），截断 ≥ 0
     friction_raw = out['Cart_Products'] - out['Purchased_Products']
     out['Friction'] = friction_raw.clip(lower=0)
@@ -103,71 +86,74 @@ def build_features(events: pd.DataFrame,
                    observation_end: pd.Timestamp,
                    scalers: dict | None = None,
                    return_scalers: bool = False):
-    """按会话计算有效停留时长，聚合为用户特征（含加购/购买的去重商品数）。
 
-    scalers / return_scalers：E_Score 标准化器的冻结复用（队列迁移分析用）。
-    基期调用传 return_scalers=True 取回标准化器，后续月传 scalers=基期标准化器，
-    保证 E_Score 的 Z 标准化参数跨月不变（否则"冻结阈值"只冻结了阈值、
-    没冻结"尺子"本身，跨月标签不可比）。默认（两者均不传）行为与旧版一致：
-    返回单表、每月重新拟合标准化。
-    """
-    # ── 第 1 步：事件去重与排序 ──
+    # 第 1 步：去重和排序
     if DEDUPE_EVENTS:
-        # 配置要求时，先去掉完全重复的事件行
+        # 配置要求时，先去掉完全重复的事件行。可在config.py中更改
         events = events.drop_duplicates()
-    # 按 用户 → 会话 → 时间 排序：让同一会话内的事件在行上相邻
-    # （后面才能用相邻行时间差来算会话内有效停留时长）
+
+    # 按 用户 → 会话 → 时间 排序：让同一会话内的事件在行上相邻，后面才能用相邻行时间差来算会话内有效停留时长
     events = events.sort_values(['user_id', 'user_session', 'event_time']).copy()
 
-    # ── 第 2 步：向量化计算会话内有效停留时长 active_seconds ──
+    #第 2 步：计算会话内有效停留时长 active_seconds
+
     # 判断"当前行与上一行是否属于同一个用户"
-    same_user = events['user_id'].eq(events['user_id'].shift())
+    same_user = events['user_id'] == events['user_id'].shift()
     # 判断"当前行与上一行是否属于同一个会话"
-    same_session_row = events['user_session'].eq(events['user_session'].shift())
+    same_session_row = events['user_session'] == events['user_session'].shift()
+
     # 两者同时成立 → 当前行与上一行是同一会话内的相邻事件
     same_session = same_user & same_session_row
-    # 当前行与上一行的事件时间差（秒）；排序后同一会话内的差分才有意义
+
+    # 计算当前行与上一行的事件时间差，并转化成秒做单位
     time_diff = events['event_time'].diff().dt.total_seconds()
+
     # 会话内合法时间差范围：(0, SESSION_GAP_SECONDS] 之外一律视为无效
     valid_diff = same_session & time_diff.between(0, SESSION_GAP_SECONDS)
+
     # 无效位置填 0，首行（无上一行）的 NaN 也补 0 → 会话内有效停留秒数
     in_session_seconds = time_diff.where(valid_diff, 0)
     events['active_seconds'] = in_session_seconds.fillna(0)
 
-    # ── 第 3 步：一次性生成各事件类型的布尔掩码与购买子集 ──
-    is_purchase = events['event_type'].eq('purchase')
-    is_view = events['event_type'].eq('view')
-    is_cart = events['event_type'].eq('cart')
-    # 只保留购买事件（后面多次使用，先取出来）
-    purchase_ev = events.loc[is_purchase]
+    # 第 3 步：提取各种行为事件
 
-    # ── 第 4 步：用户级聚合——购买侧指标 ──
+    purchase_events = events[events['event_type'] == 'purchase']
+    view_events = events[events['event_type'] == 'view']
+    cart_events = events[events['event_type'] == 'cart']
+
+    # 第 4 步：将购买数据按照用户聚合，并计算 RFM 指标
+
     # 最近购买时间（算沉默天数用）、购买次数、总消费，一次 groupby 完成
-    purchases = purchase_ev.groupby('user_id').agg(
-        Last_Purchase=('event_time', 'max'), Purchase_Frequency=('event_type', 'size'),
-        Total_Spending=('price', 'sum'))
+    purchases = purchase_events.groupby('user_id').agg(
+        Last_Purchase=('event_time', 'max'),
+        Purchase_Frequency=('event_type', 'size'),
+        Total_Spending=('price', 'sum')
+    )
 
-    # ── 第 5 步：用户级聚合——行为侧指标 ──
+    # 第 5 步：计算行为相关指标
     # 5a. 浏览页数：每个用户产生的 view 事件条数
-    view_events = events.loc[is_view]
     view_counts = view_events.groupby('user_id').size()
+    # view_counts 是一个 Series，索引是user_id,值为每个用户对应的 view_events 行数，
     views = view_counts.rename('Pages_Viewed')
+
     # 5b. 会话数：每个用户出现过的不同 user_session 个数
     session_counts = events.groupby('user_id')['user_session'].nunique()
     sessions = session_counts.rename('Session_Count')
+
     # 5c. 有效停留时长：每个用户的 active_seconds 求和
     duration_sums = events.groupby('user_id')['active_seconds'].sum()
     duration = duration_sums.rename('Estimated_Time')
+
     # 5d. 加购去重商品数：cart 事件里去重后的 product_id 个数
-    cart_events = events.loc[is_cart]
     cart_nunique = cart_events.groupby('user_id')['product_id'].nunique()
     cart_products = cart_nunique.rename('Cart_Products')
+
     # 5e. 购买去重商品数：购买事件里去重后的 product_id 个数
-    purchased_nunique = purchase_ev.groupby('user_id')['product_id'].nunique()
+    purchased_nunique = purchase_events.groupby('user_id')['product_id'].nunique()
     purchased_products = purchased_nunique.rename('Purchased_Products')
 
-    # ── 第 6 步：合并成宽表（一行一个用户）──
-    # 以"面板中出现过的全部 user_id"为骨架建立空 DataFrame
+    # 第 6 步：合并成宽表，一行一个用户
+
     features = pd.DataFrame(index=events['user_id'].unique())
     features.index.name = 'user_id'
     # 把各聚合结果按 user_id 索引 join 进来（没有该行为的用户对应列为 NaN）
@@ -176,20 +162,22 @@ def build_features(events: pd.DataFrame,
     # 把 user_id 从索引还原成普通列
     features = joined.reset_index()
 
-    # ── 第 7 步：缺失值兜底与类型规整 ──
-    # 需要把 NaN 补成 0 的数值列（没有购买/浏览等行为的用户）
+
+    # 第 7 步：处理缺失值与数据类型
+
     zero_fill_cols = ['Purchase_Frequency', 'Total_Spending', 'Pages_Viewed',
                       'Estimated_Time', 'Cart_Products', 'Purchased_Products']
     # 一次性把所有 NaN 填成 0
     features[zero_fill_cols] = features[zero_fill_cols].fillna(0)
+
     # 计数类列统一转成整数类型（fillna 之后可能是浮点）
     features['Purchase_Frequency'] = features['Purchase_Frequency'].astype(int)
     features['Pages_Viewed'] = features['Pages_Viewed'].astype(int)
     features['Cart_Products'] = features['Cart_Products'].astype(int)
     features['Purchased_Products'] = features['Purchased_Products'].astype(int)
 
-    # ── 第 8 步：最近购买距观察期结束的天数（Recency_Days）──
-    # 回退值：观察期结束距面板最早事件日期的天数 + 1（从未购买的用户用）
+    # 第 8 步：最近购买距观察期结束的天数（Recency_Days）
+    # 观察期结束距面板最早事件日期的天数 + 1（从未购买的用户用）
     fallback_recency = (observation_end - events['event_time'].min()).days + 1
     # 距最近一次购买的时间差（从未购买 → NaN）
     recency_timedelta = observation_end - features['Last_Purchase']
@@ -199,14 +187,17 @@ def build_features(events: pd.DataFrame,
     recency_filled = recency_days.fillna(fallback_recency)
     features['Recency_Days'] = recency_filled.astype(int)
 
-    # ── 第 9 步：去掉中间列并叠加探索度/摩擦指标 ──
+    # 第 9 步：去掉中间列并叠加探索度/摩擦力指标
     # Last_Purchase 只用于算 Recency_Days，之后不再需要
     feats = features.drop(columns='Last_Purchase')
+
     if return_scalers and scalers is None:
-        # 调用方要求返回标准化器且未传入：在特征表上拟合 E_Score 的三个标准化器
-        scalers = fit_engagement_scalers(feats)
-    # 叠加 E_Score / Friction / Log_Friction（scalers 传入时复用、不重拟合）
-    out = compute_engagement_metrics(feats, scalers=scalers)
+        # 调用方要求返回标准化器且未传入：在特征表上拟合 Exploration 的三个标准化器
+        scalers = F_and_E_scalers(feats)
+
+
+    # 叠加 Exploration / Friction / Log_Friction（scalers 传入时复用、不重拟合）
+    out = Friction_and_Exploration(feats, scalers=scalers)
     if return_scalers:
         # 队列迁移场景：返回 (特征表, 标准化器)
         return out, scalers
@@ -252,93 +243,101 @@ def gmm_intersection_threshold(series: pd.Series, random_state: int = RANDOM_STA
     return cut
 
 
-def segment_users(features: pd.DataFrame, thresholds: dict | None = None) -> tuple[pd.DataFrame, dict]:
+def segment_users(features: pd.DataFrame,
+                  thresholds: dict | None = None) -> tuple[pd.DataFrame, dict]:
     """
-    生成基期可解释、互斥的运营人群。
+    对用户进行精准分层
+    以“是否已购”为首要业务边界：
+    - 已购用户按价值指数上四分位识别高价值，
+    - 未购用户按行为指标识别首购潜力；
+    每个指标只在语义匹配的人群内计算。
 
-    以“是否已购”为首要业务边界：已购用户按价值指数上四分位识别高价值，
-    未购用户按行为指标识别首购潜力；每个指标只在语义匹配的人群内计算。
-
-    未购人群：E_Score 与 Friction（加购未买）的 GMM 阈值识别高潜力首购。
-    已购人群：高价值用户再按 E_Score 细分为深度互动 / 直购；
+    未购人群：Exploration 与 Friction 的 GMM 阈值识别高潜力首购。
+    已购人群：高价值用户再按 Exploration 细分为深度互动 / 直购；
     “高价值高摩擦用户”（= 跨月完全沉默）由 flag_buyer_silence 结合观察月数据标记。
 
-    参数 thresholds：传入基期拟合的阈值字典则冻结使用（队列迁移分析中
-    保证跨月标签可比），为 None 时当月重新拟合。
+    参数 thresholds：传入基期拟合的阈值字典（即F_and_E_scalers的输出结果）则冻结使用，为 None 时当月重新拟合。
     """
     # 在副本上操作，避免污染传入的特征表
     df = features.copy()
-    # 是否已购：购买频次 > 0
-    purchased = df['Purchase_Frequency'].gt(0)
+
     # 已购用户子集
-    buyer = df.loc[purchased].copy()
+    purchased = df['Purchase_Frequency'].gt(0)
+    buyer = df[df['Purchase_Frequency'] > 0].copy()
+
     # 防御：没有任何购买用户时，分层没有意义
     if buyer.empty:
         raise ValueError('建模期没有购买用户，无法完成分层。')
 
-    # ── 1. 手工 RFM 价值指数（消费 + 频次 - 沉默，全部对数化）──
-    # log1p(总消费)：压缩金额长尾，只保留数量级差异
+    #  ── 1. 将RFM三个指标压缩为一个价值指标 ──
     spending_log = np.log1p(buyer['Total_Spending'])
-    # log1p(购买频次)：次数越多越有价值
     frequency_log = np.log1p(buyer['Purchase_Frequency'])
-    # log1p(最近购买天数)：越久没买价值越低（此项用减号）
     recency_log = np.log1p(buyer['Recency_Days'])
+
     # 价值指数只在已购用户上计算
     value_index = spending_log + frequency_log - recency_log
+
     # 先整列占位 NaN，再只给已购用户填值（未购用户保持空）
     df['Value_Index'] = np.nan
     df.loc[purchased, 'Value_Index'] = value_index
-    # 第一层业务边界：已购 / 未购
+
+    # 区分已购用户和未购用户
     df['Base_Segment'] = np.where(purchased, '已购用户', '未购用户')
 
-    # 未购用户的布尔掩码（后续反复使用）
-    nonbuyer_mask = ~purchased
+    # 未购用户的布尔 Series（后续反复使用）
+    unpurchased = ~purchased
 
     # ── 2. 确定分层阈值：当月重新拟合 或 冻结基期阈值 ──
     if thresholds is None:
         # 默认：当月拟合全部阈值
+
         # 高价值线 = 价值指数的上四分位数（Q3）
         value_cut = float(value_index.quantile(0.75))
+
+
         # 未购人群的探索度 / 加购摩擦阈值：各自 GMM 两成分交点
-        nonbuyer_escore_cut = gmm_intersection_threshold(df.loc[nonbuyer_mask, 'E_Score'])
-        nonbuyer_friction_cut = gmm_intersection_threshold(df.loc[nonbuyer_mask, 'Log_Friction'])
+        nonbuyer_exploration_cut = gmm_intersection_threshold(df.loc[unpurchased, 'Exploration'])
+        nonbuyer_friction_cut = gmm_intersection_threshold(df.loc[unpurchased, 'Log_Friction'])
     else:
         # 冻结阈值：沿用基期拟合的阈值重算标签（队列迁移分析，保证跨月标签可比）
         value_cut = thresholds['vip_value_index_cutoff']
-        nonbuyer_escore_cut = thresholds['nonbuyer_e_score_cutoff']
+        nonbuyer_exploration_cut = thresholds['nonbuyer_exploration_cutoff']
         nonbuyer_friction_cut = thresholds['nonbuyer_log_friction_cutoff']
 
     # 高价值用户 = 已购且价值指数 ≥ 高价值线
     vip_mask = purchased & (df['Value_Index'] >= value_cut)
     if thresholds is None:
         # 高价值用户内部再按探索度 GMM 交点细分（当月拟合）
-        vip_escore_cut = gmm_intersection_threshold(df.loc[vip_mask, 'E_Score'])
+        vip_exploration_cut = gmm_intersection_threshold(df.loc[vip_mask, 'Exploration'])
     else:
         # 冻结基期的高价值探索度阈值
-        vip_escore_cut = thresholds['vip_e_score_cutoff']
+        vip_exploration_cut = thresholds['vip_exploration_cutoff']
 
     # ── 3. 生成互斥人群标签：先全部置默认，再逐条覆盖 ──
     # 默认标签：普通浏览用户
     df['User_Segment'] = '普通浏览用户'
     # 未购用户中，探索度与加购摩擦都过阈值 → 高潜力首购用户
-    high_potential_mask = (nonbuyer_mask
-                           & (df['E_Score'] >= nonbuyer_escore_cut)
+    high_potential_mask = (unpurchased
+                           & (df['Exploration'] >= nonbuyer_exploration_cut)
                            & (df['Log_Friction'] >= nonbuyer_friction_cut))
     df.loc[high_potential_mask, 'User_Segment'] = '高潜力首购用户'
+
     # 已购但价值指数未达高价值线 → 常规已购用户
     regular_buyer_mask = purchased & ~vip_mask
     df.loc[regular_buyer_mask, 'User_Segment'] = '常规已购用户'
+
     # 高价值用户先统一记为"直购用户"（下单干脆、不太深逛）
     df.loc[vip_mask, 'User_Segment'] = '高价值直购用户'
+
     # 高价值且探索度也过阈值 → 覆盖为"高价值深度互动用户"
-    deep_interaction_mask = vip_mask & (df['E_Score'] >= vip_escore_cut)
+    deep_interaction_mask = vip_mask & (df['Exploration'] >= vip_exploration_cut)
     df.loc[deep_interaction_mask, 'User_Segment'] = '高价值深度互动用户'
 
     # ── 4. 返回：分层结果 + 本次用到的全部阈值（供冻结复用）──
     metadata = {'vip_value_index_cutoff': value_cut,
-                'nonbuyer_e_score_cutoff': nonbuyer_escore_cut,
+                'nonbuyer_exploration_cutoff': nonbuyer_exploration_cut,
                 'nonbuyer_log_friction_cutoff': nonbuyer_friction_cut,
-                'vip_e_score_cutoff': vip_escore_cut}
+                'vip_exploration_cutoff': vip_exploration_cut}
     return df, metadata
 
 
@@ -372,7 +371,7 @@ def segment_summary(df: pd.DataFrame) -> pd.DataFrame:
     # 按人群分组聚合：每组的人数与各项均值指标
     grouped = df.groupby('User_Segment', as_index=False).agg(
         用户数=('user_id', 'size'), 平均消费=('Total_Spending', 'mean'),
-        平均购买频次=('Purchase_Frequency', 'mean'), 平均探索度=('E_Score', 'mean'),
+        平均购买频次=('Purchase_Frequency', 'mean'), 平均探索度=('Exploration', 'mean'),
         平均摩擦力=('Friction', 'mean'))
     # 用户占比 = 各组人数 / 全体人数（注意：未购用户的消费/频次均值本身为 0，展示上自然偏低）
     total_users = grouped['用户数'].sum()
@@ -456,10 +455,10 @@ def export_tracking(segmented: pd.DataFrame, path: Path | str | None = None,
 
     排序层：名单附带未购用户首购概率分（First_Purchase_Prob / Rank / TopK_Flag）
     与已购用户复购概率分（Repurchase_Prob / Rank），运营可按预算取 rank ≤ k；
-    解释层：保留 User_Segment / E_Score / Friction 供策略话术使用。
+    解释层：保留 User_Segment / Exploration / Friction 供策略话术使用。
     """
     # 导出名单所需的固定列集合（排序层 + 解释层字段）
-    cols = ['user_id', 'User_Segment', 'E_Score', 'Friction', 'Value_Index',
+    cols = ['user_id', 'User_Segment', 'Exploration', 'Friction', 'Value_Index',
             'First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag',
             'Repurchase_Prob', 'Repurchase_Rank']
     if segments is None:
@@ -1146,24 +1145,22 @@ def score_buyers_history(panel: pd.DataFrame, score_month: str,
     return out
 
 
-def load_panel(path: Path | str = PANEL_FILE, months: list | None = None,
+def load_panel(path: Path | str = PANEL_FILE,
+               months: list | None = None,
                columns: list | None = None) -> pd.DataFrame:
     """读取用户面板（parquet 或 CSV），解析 event_time 并确保 month 列（'YYYY-MM'）存在。
-
-    months：若指定（如 ['2019-10', '2019-11']），parquet 用行过滤只读这些月份
-    （predicate pushdown，大幅减少 IO）；CSV 则读取后过滤。为 None 时读全量。
+    months：若指定（如 ['2019-10', '2019-11']），parquet 用行过滤只读这些月份；CSV 则读取后过滤。为 None 时读全量。
     columns：若指定（如分析必需列子集），只读这些列，降低 IO 与内存占用
-    （面板 2000 万+ 行，字符串列如 category_code / brand 占用显著）。
     """
-    # 统一成 Path，便于判断文件类型
+    # 统一成 Path对象，便于判断文件类型
     path = Path(path)
     if path.suffix == '.parquet':
-        # ── parquet：用 filters / columns 做下推读取，减少 IO 与内存 ──
+        # 如果是parquet文件（支持筛选读取）
         try:
-            # 传给 pd.read_parquet 的关键字参数（按需追加）
+            # kwargs表示传给 pd.read_parquet 的关键字参数（按需追加）
             kwargs = {}
             if months is not None:
-                # 只读指定月份的行（predicate pushdown，大幅减少 IO）
+                # 只读指定月份的行
                 kwargs['filters'] = [('month', 'in', months)]
             if columns is not None:
                 # 只读需要的列，降低内存占用
@@ -1175,7 +1172,7 @@ def load_panel(path: Path | str = PANEL_FILE, months: list | None = None,
                 f'读取面板 {path.name} 需要 parquet 引擎（pyarrow）。请先安装依赖：'
                 f'pip install pyarrow  （或 pip install -r requirements.txt）') from exc
     else:
-        # ── CSV：先整体读入，再在内存里过滤 ──
+        # 如果是csv文件
         panel = pd.read_csv(path, parse_dates=['event_time'])
         if columns is not None:
             # 只保留调用方要求、且确实存在的列（保持原顺序）
@@ -1337,8 +1334,8 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
     if base_events is None or base_events.empty:
         raise ValueError(f'基期月 {base_month} 没有数据。')
 
-    # ── 基期：拟合阈值 + 拟合 E_Score 标准化器 ──
-    # 标准化器"冻结"给后续月复用——否则每月重新标准化会让 E_Score 的"尺子"
+    # ── 基期：拟合阈值 + 拟合 Exploration 标准化器 ──
+    # 标准化器"冻结"给后续月复用——否则每月重新标准化会让 Exploration 的"尺子"
     # 每月漂移、破坏跨月可比（那就只冻结了阈值数值、没冻结尺子本身）
     feats_base, scalers = build_features(base_events, base_events['event_time'].max(),
                                          return_scalers=True)
@@ -1360,7 +1357,7 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
         if ev is None or ev.empty:
             continue
         # 下推过滤：只保留基期用户，后续各月特征聚合计算量大幅减少。
-        # E_Score 用冻结标准化器、阈值冻结，过滤不改变任何标签判定（语义等价）。
+        # Exploration 用冻结标准化器、阈值冻结，过滤不改变任何标签判定（语义等价）。
         ev = ev[ev['user_id'].isin(base_user_ids)]
         if ev.empty:
             continue

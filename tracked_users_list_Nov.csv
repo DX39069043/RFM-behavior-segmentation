@@ -1,4 +1,4 @@
-﻿user_id,User_Segment,E_Score,Friction,Value_Index,First_Purchase_Prob,First_Purchase_Rank,TopK_Flag,Repurchase_Prob,Repurchase_Rank
+﻿user_id,User_Segment,Exploration,Friction,Value_Index,First_Purchase_Prob,First_Purchase_Rank,TopK_Flag,Repurchase_Prob,Repurchase_Rank
 124298297,高潜力首购用户,0.4368699006757238,1,,0.11032022587264678,11935.0,0.0,,
 197647707,高潜力首购用户,0.9408339632081596,3,,0.15106911821339727,7143.0,1.0,,
 296803820,高潜力首购用户,0.5104101618961282,1,,0.10119496088624662,13217.0,0.0,,

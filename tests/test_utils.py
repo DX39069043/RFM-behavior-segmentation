@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from analysis import (build_features, buyer_baseline, cohort_migration,
-                      compute_engagement_metrics, export_tracking, fit_engagement_scalers,
+                      Friction_and_Exploration, export_tracking, F_and_E_scalers,
                       flag_buyer_silence, gmm_intersection_threshold, load_panel, rate_test,
                       rolling_validation, score_buyers, score_buyers_history,
                       score_nonbuyers, score_nonbuyers_history, segment_users)
@@ -75,28 +75,28 @@ class TestComputeEngagementMetrics(unittest.TestCase):
         })
 
     def test_friction_definition(self):
-        out = compute_engagement_metrics(self.df)
+        out = Friction_and_Exploration(self.df)
         np.testing.assert_allclose(out['Friction'], [3, 4, 4])      # max(加购-购买, 0)
         self.assertTrue(np.allclose(out['Log_Friction'], np.log1p(out['Friction'])))
         self.assertNotIn('Friction_1', out.columns)
 
-    def test_escore_definition(self):
-        # E_Score = log1p 后总体标准差(z-score, ddof=0)的等权均值
-        out = compute_engagement_metrics(self.df)
+    def test_exploration_definition(self):
+        # Exploration = log1p 后总体标准差(z-score, ddof=0)的等权均值
+        out = Friction_and_Exploration(self.df)
         vals = [np.log1p(self.df[c]).to_numpy() for c in
                 ['Pages_Viewed', 'Estimated_Time', 'Session_Count']]
         z = [(v - v.mean()) / v.std(ddof=0) for v in vals]
-        np.testing.assert_allclose(out['E_Score'], np.mean(z, axis=0), atol=1e-12)
+        np.testing.assert_allclose(out['Exploration'], np.mean(z, axis=0), atol=1e-12)
 
     def test_frozen_scalers_reuse(self):
-        # 冻结标准化器后，同一数据两次计算的 E_Score 应完全一致（冻结路径 = 基期尺子）
-        scalers = fit_engagement_scalers(self.df)
-        out1 = compute_engagement_metrics(self.df)
-        out2 = compute_engagement_metrics(self.df, scalers=scalers)
-        np.testing.assert_allclose(out1['E_Score'], out2['E_Score'], atol=1e-12)
+        # 冻结标准化器后，同一数据两次计算的 Exploration 应完全一致（冻结路径 = 基期尺子）
+        scalers = F_and_E_scalers(self.df)
+        out1 = Friction_and_Exploration(self.df)
+        out2 = Friction_and_Exploration(self.df, scalers=scalers)
+        np.testing.assert_allclose(out1['Exploration'], out2['Exploration'], atol=1e-12)
 
     def test_frozen_scalers_differ_from_refit(self):
-        # 构造两组分布差异大的用户：冻结（基期）标准化与当月重拟合应产生不同 E_Score，
+        # 构造两组分布差异大的用户：冻结（基期）标准化与当月重拟合应产生不同 Exploration，
         # 证明冻结确实改变了行为，且冻结路径 = 用基期 mean/std 手工变换
         base = pd.DataFrame({
             'user_id': [1, 2, 3],
@@ -109,16 +109,16 @@ class TestComputeEngagementMetrics(unittest.TestCase):
         })
         new_pop = base.copy()
         new_pop['Pages_Viewed'] = [100, 200, 300]   # 分布整体平移
-        scalers = fit_engagement_scalers(base)
-        frozen = compute_engagement_metrics(new_pop, scalers=scalers)
-        refit = compute_engagement_metrics(new_pop)
-        self.assertFalse(np.allclose(frozen['E_Score'], refit['E_Score'], atol=1e-6))
+        scalers = F_and_E_scalers(base)
+        frozen = Friction_and_Exploration(new_pop, scalers=scalers)
+        refit = Friction_and_Exploration(new_pop)
+        self.assertFalse(np.allclose(frozen['Exploration'], refit['Exploration'], atol=1e-6))
         cols = ['Pages_Viewed', 'Estimated_Time', 'Session_Count']
         z = []
         for col in cols:
             v = np.log1p(new_pop[col].clip(lower=0)).to_numpy()
             z.append((v - scalers[col].mean_[0]) / scalers[col].scale_[0])
-        np.testing.assert_allclose(frozen['E_Score'], np.mean(z, axis=0), atol=1e-12)
+        np.testing.assert_allclose(frozen['Exploration'], np.mean(z, axis=0), atol=1e-12)
 
 
 class TestBuildFeatures(unittest.TestCase):
@@ -128,7 +128,7 @@ class TestBuildFeatures(unittest.TestCase):
         feats = build_features(events, obs_end)
         for col in ['user_id', 'Purchase_Frequency', 'Total_Spending', 'Pages_Viewed',
                     'Estimated_Time', 'Recency_Days', 'Session_Count',
-                    'Cart_Products', 'Purchased_Products', 'E_Score', 'Friction',
+                    'Cart_Products', 'Purchased_Products', 'Exploration', 'Friction',
                     'Log_Friction']:
             self.assertIn(col, feats.columns)
         self.assertNotIn('Friction_1', feats.columns)
@@ -157,11 +157,11 @@ class TestBuildFeatures(unittest.TestCase):
         self.assertIsInstance(scalers, dict)
         self.assertEqual(set(scalers), {'Pages_Viewed', 'Estimated_Time', 'Session_Count'})
         feats2 = build_features(events, obs_end, scalers=scalers)
-        np.testing.assert_allclose(feats1['E_Score'], feats2['E_Score'], atol=1e-12)
+        np.testing.assert_allclose(feats1['Exploration'], feats2['Exploration'], atol=1e-12)
         feats3 = build_features(events, obs_end)
         self.assertIsInstance(feats3, pd.DataFrame)
         # 冻结路径与默认（重拟合）对同一数据结果一致（同分布时两种口径等价）
-        np.testing.assert_allclose(feats1['E_Score'], feats3['E_Score'], atol=1e-12)
+        np.testing.assert_allclose(feats1['Exploration'], feats3['Exploration'], atol=1e-12)
 
 
 class TestSegmentUsers(unittest.TestCase):
@@ -173,8 +173,8 @@ class TestSegmentUsers(unittest.TestCase):
         self.assertTrue(seg['User_Segment'].isin(
             ['高潜力首购用户', '普通浏览用户', '常规已购用户', '高价值直购用户',
              '高价值深度互动用户']).all())
-        for key in ['vip_value_index_cutoff', 'nonbuyer_e_score_cutoff',
-                    'nonbuyer_log_friction_cutoff', 'vip_e_score_cutoff']:
+        for key in ['vip_value_index_cutoff', 'nonbuyer_exploration_cutoff',
+                    'nonbuyer_log_friction_cutoff', 'vip_exploration_cutoff']:
             self.assertIn(key, meta)
         self.assertNotIn('vip_log_friction1_cutoff', meta)
 
@@ -328,7 +328,7 @@ class TestScoreHistory(unittest.TestCase):
         seg = score_nonbuyers(seg, nov)
         seg = score_buyers(seg, nov)
         track = export_tracking(seg)
-        for col in ['user_id', 'User_Segment', 'E_Score', 'Friction', 'Value_Index',
+        for col in ['user_id', 'User_Segment', 'Exploration', 'Friction', 'Value_Index',
                     'First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag',
                     'Repurchase_Prob', 'Repurchase_Rank']:
             self.assertIn(col, track.columns)
