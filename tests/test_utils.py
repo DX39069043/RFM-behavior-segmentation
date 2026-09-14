@@ -407,7 +407,9 @@ class TestRollingValidation(unittest.TestCase):
         for col in ['训练月', '沉默月', '验证月', '实验', '目标人数', '目标购买率',
                     '对照人数', '对照购买率', '购买率差', 'p值']:
             self.assertIn(col, rates.columns)
-        self.assertIsInstance(res['基准表'], pd.DataFrame)
+        # LR 基准（含基准表）已移出滚动验证主流程，返回值只保留验证表；
+        # 基准函数本身保留为独立评估工具（见 TestBuyerBaseline）。
+        self.assertNotIn('基准表', res)
 
     def test_load_panel(self):
         ev = make_events(6)

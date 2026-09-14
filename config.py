@@ -10,6 +10,8 @@ OUTPUT_VALIDATION = ROOT / 'validation_results.csv'
 OUTPUT_TRACKING = ROOT / 'tracked_users_list_Nov.csv'
 PANEL_FILE = ROOT / 'data' / 'panel_7months.parquet'   # 按用户抽样的 7 个月面板
 OUTPUT_ROLLING = ROOT / 'rolling_validation_results.csv'
+# 历史 LR 基准产物：滚动验证主流程已不再生成（基准函数保留为独立评估工具），
+# 文件仍保留在仓库中供参考；需要重算时单独调用 analysis 的基准函数。
 OUTPUT_ROLLING_BASELINE = ROOT / 'rolling_baseline_results.csv'
 OUTPUT_COHORT_LABELS = ROOT / 'cohort_frozen_labels.csv'   # 冻结阈值重算的标签占比（标签保持/转化）
 

@@ -47,7 +47,7 @@ def Friction_and_Exploration(df: pd.DataFrame, scalers: dict | None = None) -> p
               度量“加购了却没买”的购买意图受阻（未购人群首购潜力识别用）。
     已购人群的“高摩擦”不在此定义——它指跨月完全沉默（见 flag_buyer_silence）。
 
-    scalers：可选 dict（见 fit_engagement_scalers）。为 None 时当月重新拟合
+    scalers：可选 dict（见 F_and_E_scalers）。为 None 时当月重新拟合
     """
 
     # 在副本上操作，避免污染调用方的 DataFrame
@@ -529,6 +529,8 @@ def nonbuyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
 
     返回 dict：{'metrics': {...}, 'preds': DataFrame(user_id, y, p_lr, rule)}，
     其中 p_lr 为 5 折 OOF 预测概率，供 Notebook 绘制校准/Top-k 提升曲线。
+
+    注：本函数是独立的评估工具，已不在 rolling_validation 主流程中调用。
     """
     from sklearn.metrics import brier_score_loss, roc_auc_score
     from sklearn.model_selection import StratifiedKFold, cross_val_predict
@@ -650,6 +652,8 @@ def buyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
 
     返回 dict：{'metrics': {...}, 'preds': DataFrame(user_id, y, p_lr, rule, value_index)}，
     其中 p_lr 为 5 折 OOF 复购概率，供 Notebook 绘制校准与 Top/Bottom-k 曲线。
+
+    注：本函数是独立的评估工具，已不在 rolling_validation 主流程中调用。
     """
     from sklearn.metrics import brier_score_loss, roc_auc_score
     from sklearn.model_selection import StratifiedKFold, cross_val_predict
@@ -1196,33 +1200,29 @@ def load_panel(path: Path | str = PANEL_FILE,
     return panel
 
 
-# 各臂基准的指标键名映射（用于滚动验证统一汇总）
-_ARM_METRICS_KEYS = {
-    '未购人群(首购)': {'样本': '样本(未购用户)', '结果率': '11月购买率', 'topk': 'LR Top-k 购买率'},
-    '已购人群(复购)': {'样本': '样本(已购用户)', '结果率': '11月复购率', 'topk': 'LR Top-k 复购率'},
-}
-
-
-def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
+def rolling_validation(df: pd.DataFrame,
+                       months: list | None = None) -> dict:
     """
     滚动时间外验证（已购人群为跨月沉默定义）。
 
     - 实验一（未购人群）：基期月 t 特征分层 → 观察月 t+1 购买（2 月对）；
     - 实验二（已购人群）：基期月 t 高价值买家 → 观察月 t+1 完全沉默（高价值高摩擦）
        → 验证月 t+2 是否购买（3 月组，避免“沉默月=结果月”的循环定义）；
-    - 两套 LR 基准：未购人群预测 t+1 首购；已购人群以“沉默”为规则标记、预测 t+2 复购。
-
-    返回 {'验证表': DataFrame, '基准表': DataFrame}。
+    返回 {'验证表': DataFrame}。
+    注：LR 基准评估已移出本函数（需要时单独调用 nonbuyer_baseline / buyer_baseline）。
     """
     if months is None:
         months = MONTHS
     # 一次性按月分片（面板 2000 万+ 行，避免后续每对月份都全表扫描）
+
     by_month = {}
-    for m, g in panel.groupby('month'):
+    for m, g in df.groupby('month'):
         by_month[m] = g
-    # rate_rows：两组购买率对比结果行；auc_rows：LR 基准指标行
+        # m：这一组的分组键，也就是 month 列的一个唯一值，比如 '2019-10'、'2019-11'；
+        # g：这一组对应的子 DataFrame，包含原 df 中所有 month == m 的行。
+
+    # 收集每个月份对 / 月组的购买率对比结果，最终组成“验证表”
     rate_rows = []
-    auc_rows = []
     # 按月滑动：基期月 t → 观察月 t+1（实验二还要用到 t+2）
     for t in range(len(months) - 1):
         base_m = months[t]
@@ -1239,32 +1239,14 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
 
         # ── 实验一（未购人群）：基期特征 → 观察月购买 ──
         # 规则人群 = 高潜力首购用户；对照组 = 普通浏览用户
-        potential = set(segmented.loc[segmented['User_Segment'].eq('高潜力首购用户'), 'user_id'])
-        nonbuyer_control = set(segmented.loc[segmented['User_Segment'].eq('普通浏览用户'), 'user_id'])
+        potential = set(segmented.loc[segmented['User_Segment'] == '高潜力首购用户', 'user_id'])
+        nonbuyer_control = set(segmented.loc[segmented['User_Segment'] == '普通浏览用户', 'user_id'])
         # 两组在观察月的购买率对比 + 显著性检验
         res1 = rate_test(obs_events, potential, nonbuyer_control, f'{base_m}→{obs_m} 高潜力首购')
         row1 = {'训练月': base_m, '沉默月': '', '验证月': obs_m, '实验': '高潜力首购'}
         # 把 rate_test 返回的各列指标并入这一行
         row1.update(res1)
         rate_rows.append(row1)
-
-        # ── 未购人群 LR 基准 ──
-        try:
-            base = nonbuyer_baseline(segmented, obs_events)
-            m = base['metrics']
-            # 本臂指标键名与统一汇总列的映射
-            keys = _ARM_METRICS_KEYS['未购人群(首购)']
-            auc_row = {
-                '训练月': base_m, '沉默月': '', '验证月': obs_m, '人群': '未购人群(首购)',
-                '样本': m[keys['样本']], '全体未购用户平均首购率': m[keys['结果率']],
-                '高潜力首购用户购买率': m['规则 Top-k 购买率'],
-                '规则人群规模': m['规则人群规模'], '规则 AUC': m['规则 AUC'],
-                'LR AUC (OOF)': m['LR AUC (5折OOF)'], 'LR Top-k 率': m[keys['topk']],
-            }
-            auc_rows.append(auc_row)
-        except ValueError as exc:
-            # 该月样本不足以拟合基准（如未购用户太少）→ 记录后跳过
-            print(f'  [未购人群] {base_m}→{obs_m} 跳过: {exc}')
 
         # ── 实验二（已购人群·跨月沉默）：基期高价值 → 观察月沉默 → 验证月购买（需第 3 个月）──
         if t + 2 < len(months):
@@ -1277,7 +1259,7 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
             # 用观察月事件标记"跨月完全沉默"的高价值用户（= 高价值高摩擦）
             flagged = flag_buyer_silence(segmented, obs_events)
             # 沉默组：高价值高摩擦用户；对照组：观察月仍活跃的高价值用户
-            silent_vip = set(flagged.loc[flagged['User_Segment'].eq('高价值高摩擦用户'), 'user_id'])
+            silent_vip = set(flagged.loc[flagged['User_Segment'] == '高价值高摩擦用户', 'user_id'])
             active_vip_mask = flagged['User_Segment'].isin(['高价值直购用户', '高价值深度互动用户'])
             active_vip = set(flagged.loc[active_vip_mask, 'user_id'])
             # 两组在验证月（t+2）的购买率对比（避免"沉默月 = 结果月"的循环定义）
@@ -1289,27 +1271,9 @@ def rolling_validation(panel: pd.DataFrame, months: list | None = None) -> dict:
             row2.update(res2)
             rate_rows.append(row2)
 
-            # ── 已购人群 LR 基准：规则标记 = 沉默，预测验证月复购 ──
-            try:
-                base = buyer_baseline(flagged, out_events)
-                m = base['metrics']
-                # 本臂指标键名与统一汇总列的映射
-                keys = _ARM_METRICS_KEYS['已购人群(复购)']
-                auc_row = {
-                    '训练月': base_m, '沉默月': obs_m, '验证月': out_m, '人群': '已购人群(复购)',
-                    '样本': m[keys['样本']], '全体已购用户平均复购率': m[keys['结果率']],
-                    '高价值高摩擦用户复购率': m['规则 Top-k 复购率'],
-                    '规则人群规模': m['规则人群规模'], '规则 AUC': m['规则 AUC'],
-                    'LR AUC (OOF)': m['LR AUC (5折OOF)'], 'LR Top-k 率': m[keys['topk']],
-                }
-                auc_rows.append(auc_row)
-            except ValueError as exc:
-                # 该三周样本不足以拟合基准 → 记录后跳过
-                print(f'  [已购人群] {base_m}→{obs_m}→{out_m} 跳过: {exc}')
-    # 汇总：验证表（率对比）+ 基准表（LR 指标）
+    # 汇总成一张表：规则标签在各月份对 / 月组上的购买率对比
     validation_table = pd.DataFrame(rate_rows)
-    baseline_table = pd.DataFrame(auc_rows)
-    return {'验证表': validation_table, '基准表': baseline_table}
+    return {'验证表': validation_table}
 
 
 def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None = None) -> pd.DataFrame:
