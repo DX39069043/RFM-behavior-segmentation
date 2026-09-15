@@ -816,7 +816,7 @@ plt.show()
 # ═══════════════════════════════════════════════════
 # 汇总报告：各人群 11 月转化率对比
 # ═══════════════════════════════════════════════════
-from analysis import flag_buyer_silence
+from analysis import silent_buyer
 
 # 已购人群“高摩擦” = 跨月完全沉默：10月高价值买家在 11 月无任何行为
 # ⚠️ 口径说明：先保存 10 月基期标签（Base_User_Segment），再做沉默分流。
@@ -825,7 +825,7 @@ from analysis import flag_buyer_silence
 # 转化率变成已知未来的条件概率（存活偏差/未来信息泄漏）。
 final_df = final_df.copy()
 final_df['Base_User_Segment'] = final_df['User_Segment']
-final_df = flag_buyer_silence(final_df, df_nov)
+final_df = silent_buyer(final_df, df_nov)
 
 target_potential_ids = final_df[final_df['Base_User_Segment'] == '高潜力首购用户']['user_id'].to_numpy()
 control_low_value_ids = final_df[final_df['Base_User_Segment'] == '普通浏览用户']['user_id'].to_numpy()
@@ -833,6 +833,7 @@ target_regular_ids = final_df[final_df['Base_User_Segment'] == '常规已购用�
 target_efficient_vip_ids = final_df[final_df['Base_User_Segment'] == '高价值直购用户']['user_id'].to_numpy()
 target_immersive_vip_ids = final_df[final_df['Base_User_Segment'] == '高价值深度互动用户']['user_id'].to_numpy()
 target_silent_ids = final_df[final_df['User_Segment'] == '高价值高摩擦用户']['user_id'].to_numpy()
+
 
 def evaluate_nov_performance(user_list, group_name):
     if len(user_list) == 0:
@@ -851,6 +852,7 @@ def evaluate_nov_performance(user_list, group_name):
         '11月营收': round(rev, 2),
         '人均消费': round(arppu, 2)
     }
+
 
 groups = [
     (target_potential_ids, "高潜力首购用户"),

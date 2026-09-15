@@ -45,7 +45,7 @@ def Friction_and_Exploration(df: pd.DataFrame, scalers: dict | None = None) -> p
     Exploration: 浏览页数、有效停留时长、会话数的对数标准化均值。
     Friction: 加购但未购买的去重商品数（Cart_Products - Purchased_Products，截断≥0），
               度量“加购了却没买”的购买意图受阻（未购人群首购潜力识别用）。
-    已购人群的“高摩擦”不在此定义——它指跨月完全沉默（见 flag_buyer_silence）。
+    已购人群的“高摩擦”不在此定义——它指跨月完全沉默（见 silent_buyer）。
 
     scalers：可选 dict（见 F_and_E_scalers）。为 None 时当月重新拟合
     """
@@ -205,13 +205,11 @@ def build_features(events: pd.DataFrame,
     return out
 
 
-def gmm_intersection_threshold(series: pd.Series, random_state: int = RANDOM_STATE) -> float:
+def gmm(series: pd.Series,
+        random_state: int = RANDOM_STATE) -> float:
     """
-    两成分 GMM 的后验概率交点；拟合不稳定时退回中位数。
+    两成分 GMM 的后验概率交点；数据太少无法训练则返回中位数。
 
-    阈值取两成分后验概率相等的位置，综合考虑分量方差与权重。
-    零膨胀（大量 0 值，如“加购未买”计数）场景下，若交点落在 ≤0 且序列本身
-    非负，则取最小正值作为阈值，语义即“有加购即高摩擦”。
     """
     # 先把正负无穷替换成 NaN，再丢弃 NaN，得到干净的观测值
     cleaned = series.replace([np.inf, -np.inf], np.nan).dropna()
@@ -219,8 +217,11 @@ def gmm_intersection_threshold(series: pd.Series, random_state: int = RANDOM_STA
     # 样本太少或取值种类太少时 GMM 拟合不可靠 → 退回中位数
     if len(x) < 50 or np.unique(x).size < 4:
         return float(np.nanmedian(x))
+
     # 拟合两成分高斯混合：一个成分通常是"多数普通值"，另一个是"少数高值"
     model = GaussianMixture(n_components=2, random_state=random_state, n_init=5)
+    # n_init=5：独立运行 5 次，每次用不同的初始化，最后选对数似然最高的那个模型。
+
     x_2d = x.reshape(-1, 1)
     model.fit(x_2d)
     # 在 [1% 分位, 99% 分位] 之间均匀取 2000 个点作为候选阈值
@@ -228,8 +229,13 @@ def gmm_intersection_threshold(series: pd.Series, random_state: int = RANDOM_STA
     high_q = np.quantile(x, 0.99)
     grid = np.linspace(low_q, high_q, 2000)
     grid_2d = grid.reshape(-1, 1)
-    # 每个网格点上成分 0 的后验概率（离 0.5 越近 = 两个成分概率越接近）
+
+    # 使用训练好的模型，预测这些候选阈值点
     posterior = model.predict_proba(grid_2d)
+    # 使用predict_proba 返回软概率
+    # predict返回的是硬概率
+
+    # 每个网格点上成分 0 的后验概率（离 0.5 越近 = 两个成分概率越接近）
     posterior_comp0 = posterior[:, 0]
     posterior_gap = np.abs(posterior_comp0 - 0.5)
     # 取"两成分后验概率最接近相等"的网格点作为交点阈值
@@ -254,7 +260,7 @@ def segment_users(features: pd.DataFrame,
 
     未购人群：Exploration 与 Friction 的 GMM 阈值识别高潜力首购。
     已购人群：高价值用户再按 Exploration 细分为深度互动 / 直购；
-    “高价值高摩擦用户”（= 跨月完全沉默）由 flag_buyer_silence 结合观察月数据标记。
+    “高价值高摩擦用户”（= 跨月完全沉默）由 silent_buyer 结合观察月数据标记。
 
     参数 thresholds：传入基期拟合的阈值字典（即F_and_E_scalers的输出结果）则冻结使用，为 None 时当月重新拟合。
     """
@@ -296,8 +302,8 @@ def segment_users(features: pd.DataFrame,
 
 
         # 未购人群的探索度 / 加购摩擦阈值：各自 GMM 两成分交点
-        nonbuyer_exploration_cut = gmm_intersection_threshold(df.loc[unpurchased, 'Exploration'])
-        nonbuyer_friction_cut = gmm_intersection_threshold(df.loc[unpurchased, 'Log_Friction'])
+        nonbuyer_exploration_cut = gmm(df.loc[unpurchased, 'Exploration'])
+        nonbuyer_friction_cut = gmm(df.loc[unpurchased, 'Log_Friction'])
     else:
         # 冻结阈值：沿用基期拟合的阈值重算标签（队列迁移分析，保证跨月标签可比）
         value_cut = thresholds['vip_value_index_cutoff']
@@ -308,7 +314,7 @@ def segment_users(features: pd.DataFrame,
     vip_mask = purchased & (df['Value_Index'] >= value_cut)
     if thresholds is None:
         # 高价值用户内部再按探索度 GMM 交点细分（当月拟合）
-        vip_exploration_cut = gmm_intersection_threshold(df.loc[vip_mask, 'Exploration'])
+        vip_exploration_cut = gmm(df.loc[vip_mask, 'Exploration'])
     else:
         # 冻结基期的高价值探索度阈值
         vip_exploration_cut = thresholds['vip_exploration_cutoff']
@@ -341,7 +347,7 @@ def segment_users(features: pd.DataFrame,
     return df, metadata
 
 
-def flag_buyer_silence(segmented: pd.DataFrame, obs_events: pd.DataFrame) -> pd.DataFrame:
+def silent_buyer(segmented: pd.DataFrame, obs_events: pd.DataFrame) -> pd.DataFrame:
     """
     已购人群“跨月沉默”高摩擦标记（流失判定）。
 
@@ -400,13 +406,16 @@ def proportion_ci(successes: int, total: int) -> tuple[float, float]:
     return centre - half, centre + half
 
 
-def rate_test(nov: pd.DataFrame, treatment_ids: set, control_ids: set, title: str) -> dict:
+def rolling_validation_rate_test(obs_events: pd.DataFrame,
+                                 treatment_ids: set,
+                                 control_ids: set,
+                                 title: str) -> dict:
     """两组 11 月购买率对比：卡方检验（Yates 校正）+ Wilson 95% CI。
 
     当期望频数含 0（样本过小或某组无事件）导致卡方失效时，回退 Fisher 精确检验。
     """
     # 验证月里实际发生购买的 user_id 集合
-    buyers = set(nov.loc[nov['event_type'].eq('purchase'), 'user_id'])
+    buyers = set(obs_events.loc[obs_events['event_type'] == 'purchase', 'user_id'])
     # 目标组（treatment）与对照组（control）中分别有多少人购买了
     a = len(treatment_ids & buyers)
     b = len(control_ids & buyers)
@@ -474,40 +483,35 @@ def export_tracking(segmented: pd.DataFrame, path: Path | str | None = None,
     return tracking
 
 
-def _nonbuyer_lr_features(nb: pd.DataFrame) -> np.ndarray:
-    """未购用户的 LR 特征矩阵：log1p(页数 / 停留时长 / 会话数 / 加购商品数)。"""
-    # 四个输入特征各自做 log1p 变换（压缩长尾、处理零值）
-    pages_log = np.log1p(nb['Pages_Viewed'])
-    time_log = np.log1p(nb['Estimated_Time'])
-    sessions_log = np.log1p(nb['Session_Count'])
-    cart_log = np.log1p(nb['Cart_Products'])
-    # 把 4 个一维向量按列堆叠成 (样本数, 4) 的特征矩阵
-    feature_columns = [pages_log, time_log, sessions_log, cart_log]
-    x_matrix = np.column_stack(feature_columns)
-    return x_matrix
+def _lr_features(frame: pd.DataFrame) -> np.ndarray:
+    """LR 的统一特征矩阵：log1p(原始字段聚合，共 7 维)。
 
+    只用原始数据里的字段聚合——消费额 / 购买频次 / 最近购买天数，
+    以及浏览页数 / 有效停留时长 / 会话数 / 加购去重商品数；
+    不使用项目自造的复合指标（Exploration / Friction / Value_Index）。
 
-def _buyer_lr_features(b: pd.DataFrame) -> np.ndarray:
-    """已购用户的 LR 特征矩阵：log1p(RFM + 浏览/加购行为共 7 维)。"""
-    # 前三个是 RFM 类特征：消费金额、购买频次、最近购买天数
-    spending_log = np.log1p(b['Total_Spending'])
-    frequency_log = np.log1p(b['Purchase_Frequency'])
-    recency_log = np.log1p(b['Recency_Days'])
-    # 后四个是行为类特征：页数、停留时长、会话数、加购商品数
-    pages_log = np.log1p(b['Pages_Viewed'])
-    time_log = np.log1p(b['Estimated_Time'])
-    sessions_log = np.log1p(b['Session_Count'])
-    cart_log = np.log1p(b['Cart_Products'])
-    # 把 7 个一维向量按列堆叠成 (样本数, 7) 的特征矩阵
+    注：对未购用户，消费 / 频次恒为 0、近度为观察期兜底常量，标准化后恒为 0，
+    对模型没有影响——因此一套特征可以服务所有人群，打分时无需判断人群。
+    """
+    # 前三个：原始购买字段的聚合
+    spending_log = np.log1p(frame['Total_Spending'])
+    frequency_log = np.log1p(frame['Purchase_Frequency'])
+    recency_log = np.log1p(frame['Recency_Days'])
+    # 后四个：原始行为字段的聚合
+    pages_log = np.log1p(frame['Pages_Viewed'])
+    time_log = np.log1p(frame['Estimated_Time'])
+    sessions_log = np.log1p(frame['Session_Count'])
+    cart_log = np.log1p(frame['Cart_Products'])
+    # 按固定列序堆叠成 (样本数, 7)
     feature_columns = [spending_log, frequency_log, recency_log,
                        pages_log, time_log, sessions_log, cart_log]
     x_matrix = np.column_stack(feature_columns)
     return x_matrix
 
 
-_BUYER_FEATURE_NAMES = ['log1p(Total_Spending)', 'log1p(Purchase_Frequency)', 'log1p(Recency_Days)',
-                        'log1p(Pages_Viewed)', 'log1p(Estimated_Time)', 'log1p(Session_Count)',
-                        'log1p(Cart_Products)']
+_LR_FEATURE_NAMES = ['log1p(Total_Spending)', 'log1p(Purchase_Frequency)', 'log1p(Recency_Days)',
+                     'log1p(Pages_Viewed)', 'log1p(Estimated_Time)', 'log1p(Session_Count)',
+                     'log1p(Cart_Products)']
 
 
 def _lr_pipeline() -> 'object':
@@ -552,10 +556,10 @@ def nonbuyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
     y = y_int.to_numpy()
 
     # ── 2. 特征矩阵与规则标记 ──
-    # 完整特征矩阵（4 维浏览/加购行为）
-    x_full = _nonbuyer_lr_features(nb)
-    # 只含前 3 维浏览特征（用于对比"仅浏览特征"能到多少 AUC）
-    x_vol = x_full[:, :3]
+    # 完整特征矩阵（统一 7 维：原始购买字段 + 原始行为字段）
+    x_full = _lr_features(nb)
+    # 只含浏览三指标（第 4~6 列，用于对比"仅浏览特征"能到多少 AUC）
+    x_vol = x_full[:, 3:6]
     # 规则标记：规则分层命中的"高潜力首购用户"记为 1
     is_potential = nb['User_Segment'].eq('高潜力首购用户')
     rule_int = is_potential.astype(int)
@@ -597,8 +601,7 @@ def nonbuyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
     # ── 5. 全量拟合一次，输出各特征系数（业务解释用）──
     pipe.fit(x_full, y)
     # 特征名与系数一一对应
-    coef_names = ['log1p(Pages_Viewed)', 'log1p(Estimated_Time)', 'log1p(Session_Count)',
-                  'log1p(Cart_Products)']
+    coef_names = _LR_FEATURE_NAMES
     coef_values = pipe.named_steps['logisticregression'].coef_[0]
     coef = {}
     for name, value in zip(coef_names, coef_values):
@@ -643,7 +646,7 @@ def buyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
                    random_state: int = RANDOM_STATE) -> dict:
     """
     已购用户复购基准：以基期已购用户为样本，用逻辑回归预测验证月是否复购，
-    检验“高价值高摩擦”（跨月完全沉默，需先经 flag_buyer_silence 标记）规则
+    检验“高价值高摩擦”（跨月完全沉默，需先经 silent_buyer 标记）规则
     与手工 RFM 价值指数作为排序器的判别力。
 
     双视角解读：
@@ -678,8 +681,8 @@ def buyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
         raise ValueError('验证期没有复购样本，无法拟合复购基准。')
 
     # ── 2. 特征矩阵、规则标记与手工价值指数 ──
-    # 完整特征矩阵（7 维：RFM + 行为）
-    x_full = _buyer_lr_features(buyer)
+    # 完整特征矩阵（统一 7 维）
+    x_full = _lr_features(buyer)
     # 规则标记：被标记为"高价值高摩擦"（跨月沉默）的用户记为 1
     is_silent = buyer['User_Segment'].eq('高价值高摩擦用户')
     rule_int = is_silent.astype(int)
@@ -721,7 +724,7 @@ def buyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
     pipe.fit(x_full, y)
     coef_values = pipe.named_steps['logisticregression'].coef_[0]
     coef = {}
-    for name, value in zip(_BUYER_FEATURE_NAMES, coef_values):
+    for name, value in zip(_LR_FEATURE_NAMES, coef_values):
         coef[name] = float(value)
 
     # ── 6. Bootstrap：LR AUC − 规则 AUC 的 95% 置信区间 ──
@@ -760,139 +763,6 @@ def buyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
     return {'metrics': metrics, 'preds': preds}
 
 
-def score_nonbuyers(segmented: pd.DataFrame, nov: pd.DataFrame,
-                    pool_segments: list | None = None,
-                    top_ratio: float | None = None) -> pd.DataFrame:
-    """
-    对未购用户全量拟合并输出连续首购概率分（排序层），
-    返回带 First_Purchase_Prob / First_Purchase_Rank / TopK_Flag 的副本。
-
-    规则圈池 + LR 池内排序：候选池 = 规则认可的人群（默认 POOL_SEGMENTS，
-    未购人群里即"高潜力首购用户"，低意向的"普通浏览用户"不入池）；
-    LR 概率分只在池内排名，TopK_Flag 标记池内前 top_ratio（默认 50%）的人优先触达
-    ——k = ceil(池内人数 × top_ratio)，不再是"目标群体的总人数"。
-    非池用户保留概率分（供查看），但 Rank / TopK_Flag 为 NaN。
-    注：本列为全量拟合的排序分，用于选人；预期触达效果以 nonbuyer_baseline
-    的 OOF 评估为准。上线时需用滚动历史窗口训练、未来月验证并定期重校准。
-    """
-    # 参数默认值：未显式传入时用 config 里的候选池与 top 比例
-    if pool_segments is None:
-        pool_segments = POOL_SEGMENTS
-    if top_ratio is None:
-        top_ratio = POOL_TOP_RATIO
-    # 在副本上叠加概率分，避免污染调用方
-    out = segmented.copy()
-    # 未购用户掩码（只有他们能拿到首购概率分）
-    nb_mask = out['Purchase_Frequency'].eq(0)
-    # 未购用户子集
-    nb = out.loc[nb_mask]
-    # 防御：没有未购用户时无法打分
-    if nb.empty:
-        raise ValueError('没有未购用户，无法打分。')
-    # 验证月实际购买的 user_id 集合 → 训练标签
-    buyers = set(nov.loc[nov['event_type'].eq('purchase'), 'user_id'])
-    # 判断每个未购用户是否出现在验证月的购买名单里（得到 True/False 序列）
-    is_buyer = nb['user_id'].isin(buyers)
-    # 布尔值转成 1/0 整数，再转 NumPy 数组供 sklearn 使用
-    y_int = is_buyer.astype(int)
-    y = y_int.to_numpy()
-    # 防御：验证期必须两类样本都有，否则拟合不出有意义的概率分
-    if len(np.unique(y)) < 2:
-        raise ValueError('验证期没有购买样本，无法拟合首购概率分。')
-    # 全量拟合 LR 并预测未购用户的购买概率
-    pipe = _lr_pipeline()
-    nb_features = _nonbuyer_lr_features(nb)
-    pipe.fit(nb_features, y)
-    proba_full = pipe.predict_proba(nb_features)
-    # 取"购买"那一类的概率（第 2 列）
-    proba = proba_full[:, 1]
-
-    # 三列先占位 NaN，再按人群填充
-    out['First_Purchase_Prob'] = np.nan
-    out['First_Purchase_Rank'] = np.nan
-    out['TopK_Flag'] = np.nan
-    # 所有未购用户都保留概率分（供查看），非未购用户保持 NaN
-    out.loc[nb_mask, 'First_Purchase_Prob'] = proba
-
-    # 只在候选池内排序：候选池 = 未购用户中规则认可的人群（低意向的普通浏览不入池）
-    pool_mask = nb_mask & out['User_Segment'].isin(pool_segments)
-    pool_idx = out.loc[pool_mask].index
-    if len(pool_idx) > 0:
-        # 概率分转成以 nb 行为索引的 Series，再只取池内用户
-        proba_series = pd.Series(proba, index=nb.index)
-        pool_proba = proba_series.loc[pool_idx]
-        # 池内按概率降序排名（method='min'：并列给相同的最小名次）
-        ranks = pool_proba.rank(ascending=False, method='min')
-        # 优先触达人数 k = ceil(池内人数 × top_ratio)
-        k = int(np.ceil(len(pool_idx) * top_ratio))
-        out.loc[pool_idx, 'First_Purchase_Rank'] = ranks
-        # 池内前 k 名标记为 TopK（1），其余为 0
-        topk_mask = ranks <= k
-        out.loc[pool_idx, 'TopK_Flag'] = topk_mask.astype(int)
-    return out
-
-
-def score_buyers(segmented: pd.DataFrame, nov: pd.DataFrame,
-                 pool_segments: list | None = None) -> pd.DataFrame:
-    """
-    对已购用户全量拟合并输出连续复购概率分（排序层），
-    返回带 Repurchase_Prob / Repurchase_Rank 的副本（未购用户为 NaN）。
-
-    与 score_nonbuyers 对应：规则圈池 + LR 池内排序——复购排名只在
-    候选池内计算（默认 POOL_SEGMENTS，即规则认可的人群，供触达排序
-    Top-k / 流失预警 Bottom-k 按预算取用）；非池用户保留概率分但 Rank 为 NaN。
-    注：本列为全量拟合的排序分；预期效果以 buyer_baseline 的 OOF 评估为准。
-    上线时需用滚动历史窗口训练、未来月验证并定期重校准。
-    """
-    # 参数默认值：未显式传入时用 config 里的候选池
-    if pool_segments is None:
-        pool_segments = POOL_SEGMENTS
-    # 在副本上叠加概率分，避免污染调用方
-    out = segmented.copy()
-    # 已购用户掩码（只有他们能拿到复购概率分）
-    buyer_mask = out['Purchase_Frequency'].gt(0)
-    # 已购用户子集
-    buyer = out.loc[buyer_mask]
-    # 防御：没有已购用户时无法打分
-    if buyer.empty:
-        raise ValueError('没有已购用户，无法打分。')
-    # 验证月实际购买的 user_id 集合 → 训练标签
-    buyers_nov = set(nov.loc[nov['event_type'].eq('purchase'), 'user_id'])
-    # 判断每个已购用户是否出现在验证月的购买名单里（得到 True/False 序列）
-    is_buyer = buyer['user_id'].isin(buyers_nov)
-    # 布尔值转成 1/0 整数，再转 NumPy 数组供 sklearn 使用
-    y_int = is_buyer.astype(int)
-    y = y_int.to_numpy()
-    # 防御：验证期必须两类样本都有，否则拟合不出有意义的概率分
-    if len(np.unique(y)) < 2:
-        raise ValueError('验证期没有复购样本，无法拟合复购概率分。')
-    # 全量拟合 LR 并预测已购用户的复购概率
-    pipe = _lr_pipeline()
-    buyer_features = _buyer_lr_features(buyer)
-    pipe.fit(buyer_features, y)
-    proba_full = pipe.predict_proba(buyer_features)
-    # 取"复购"那一类的概率（第 2 列）
-    proba = proba_full[:, 1]
-
-    # 两列先占位 NaN，再按人群填充
-    out['Repurchase_Prob'] = np.nan
-    out['Repurchase_Rank'] = np.nan
-    # 所有已购用户都保留概率分（供查看），未购用户保持 NaN
-    out.loc[buyer_mask, 'Repurchase_Prob'] = proba
-
-    # 只在候选池内排序：池 = 已购用户中规则认可的人群
-    pool_mask = buyer_mask & out['User_Segment'].isin(pool_segments)
-    pool_idx = out.loc[pool_mask].index
-    if len(pool_idx) > 0:
-        # 概率分转成以 buyer 行为索引的 Series，再只取池内用户
-        proba_series = pd.Series(proba, index=buyer.index)
-        pool_proba = proba_series.loc[pool_idx]
-        # 池内按概率降序排名（method='min'：并列给相同的最小名次）
-        ranks = pool_proba.rank(ascending=False, method='min')
-        out.loc[pool_idx, 'Repurchase_Rank'] = ranks
-    return out
-
-
 def _next_month(m: str) -> str:
     """'2019-10' -> '2019-11'（月份字符串递增）。"""
     # 拆出年份与月份两个整数（m 形如 '2019-10'）
@@ -905,20 +775,19 @@ def _next_month(m: str) -> str:
     return f'{year:04d}-{month + 1:02d}'
 
 
-def _history_train_samples(panel: pd.DataFrame, score_month: str, buyer: bool,
-                           cache: dict | None = None):
-    """构建打分月之前的所有 (特征月 → 次月标签) 训练样本（未购/已购人群），返回 (X, y)。
+def LR_data_split(panel: pd.DataFrame,
+                  score_month: str,
+                  cache: dict | None = None):
+    """构造训练集 (X, y)：更早月份「训练行为月 → 训练结果月」的全体用户样本。
 
-    训练样本对象 = m 月用户（m < score_month），打分对象 = score_month 用户——
-    模型从未见过打分对象的结果（次月购买），严格避免"偷看答案"。
-    cache：可选 dict（month → 特征表 / '_by_month' → 按月分片），跨打分月复用。
+    时间窗口是防泄漏的核心：只收训练结果月不晚于本轮（= 被打分用户所在月）的月份对，
+    因此被打分用户在预测月的结果永远不会进入训练集。
+    特征用统一的 _lr_features；标签 = 该用户在训练结果月是否购买（原始事件口径）。
     """
     # ── 1. 按月分片（一次性），避免对 2000 万+ 行面板反复全表布尔过滤 ──
     if cache is not None and '_by_month' in cache:
-        # 缓存里已有按月分片 → 直接复用
         by_month = cache['_by_month']
     else:
-        # 首次：把 panel 按 month 列切分成 {月名 -> 该月事件表} 的字典
         by_month = {}
         for m, g in panel.groupby('month'):
             by_month[m] = g
@@ -926,227 +795,114 @@ def _history_train_samples(panel: pd.DataFrame, score_month: str, buyer: bool,
             cache['_by_month'] = by_month
     # 按月名排序（'YYYY-MM' 字典序即时间顺序）
     months = sorted(by_month)
-    # X_parts：各月特征矩阵片段；y_parts：各月标签片段（之后纵向拼接）
+    # X_parts / y_parts：各月片段，最后纵向拼接
     X_parts = []
     y_parts = []
     for m in months:
-        # 当前特征月的下一个自然月（标签月）
+        # 训练行为月的下一个自然月 = 训练结果月（提供"次月是否购买"标签）
         nm = _next_month(m)
-        # 若标签月已经超过打分月，后续月份只会更晚 → 终止循环
+        # 时间窗口：训练结果月不得晚于本轮训练结果月（否则泄漏）
         if nm > score_month:
             break
         ev_m = by_month.get(m)
         ev_nm = by_month.get(nm)
-        # 特征月或标签月缺数据 / 为空 → 该月对无法构成训练样本，跳过
+        # 任一月份缺数据 → 该月份对无法构成训练样本，跳过
         if ev_m is None or ev_nm is None or ev_m.empty or ev_nm.empty:
             continue
         if cache is not None and m in cache:
-            # 该月特征已缓存 → 直接复用
             feats = cache[m]
         else:
-            # 用当月事件构建用户特征（观察期终点 = 当月最后一条事件时间）
+            # 用该月事件构建用户特征（观察期终点 = 当月最后一条事件时间）
             feats = build_features(ev_m, ev_m['event_time'].max())
             if cache is not None:
                 cache[m] = feats
-        # 标签月里实际购买的 user_id 集合（打分时模型看不到这份"答案"）
+        # 训练标签：该月用户在训练结果月是否购买（原始事件口径）
         buyers_nm = set(ev_nm.loc[ev_nm['event_type'].eq('purchase'), 'user_id'])
-        if buyer:
-            # 已购人群分支：样本 = 当月已购用户，标签 = 次月是否复购
-            sub = feats[feats['Purchase_Frequency'].gt(0)].copy()
-            # 判断当月已购用户是否在次月又购买（True/False → 1/0）
-            is_buyer = sub['user_id'].isin(buyers_nm)
-            y_int = is_buyer.astype(int)
-            y = y_int.to_numpy()
-            X_parts.append(_buyer_lr_features(sub))
-        else:
-            # 未购人群分支：样本 = 当月未购用户，标签 = 次月是否首购
-            sub = feats[feats['Purchase_Frequency'].eq(0)].copy()
-            # 判断当月未购用户是否在次月完成首购（True/False → 1/0）
-            is_buyer = sub['user_id'].isin(buyers_nm)
-            y_int = is_buyer.astype(int)
-            y = y_int.to_numpy()
-            X_parts.append(_nonbuyer_lr_features(sub))
+        is_buyer = feats['user_id'].isin(buyers_nm)
+        y = is_buyer.astype(int).to_numpy()
+        # 训练样本 = 该月全体用户（不按人群拆分：统一一套特征、一个模型）
+        X_parts.append(_lr_features(feats))
         y_parts.append(y)
-    # 防御：打分月之前没有任何训练数据（10 月是最早建模月，不需要选人）
+    # 防御：没有更早的月份可用（10 月是最早的建模月）
     if not X_parts:
         raise ValueError(
             f'{score_month} 无法给出概率分：没有更早月份的训练数据。'
-            '（10 月是最早建模月，不需要选人；LR 需要"上上个月/上个月"的历史行为训练，'
-            '打分月最早从 11 月开始）')
-    # 纵向拼接所有月份：特征行数总和 = 标签长度
+            '（10 月是最早的建模月，没有更早的"训练行为月 → 训练结果月"样本对可用；'
+            '因此最早从 11 月开始打分）')
+    # 纵向拼接：特征行数总和 = 标签长度
     X_train = np.vstack(X_parts)
     y_train = np.concatenate(y_parts)
     return X_train, y_train
 
 
-def score_nonbuyers_history(panel: pd.DataFrame, score_month: str,
-                            pool_segments: list | None = None,
-                            top_ratio: float | None = None,
-                            cache: dict | None = None) -> pd.DataFrame:
+def LR_predict_rank(panel: pd.DataFrame,
+                    score_month: str,
+                    target_user_ids,
+                    cache: dict | None = None) -> pd.DataFrame:
+    """纯工具：预测指定用户在『预测月』的购买概率，并在这些用户内部按概率排名。
+
+    输入
+    ----
+    panel           : 事件级面板（提供更早月份的训练原料）
+    score_month     : 被打分用户所在的月份（= 本轮训练结果月）
+    target_user_ids : 要预测的用户名单（由调用方决定；函数不筛选、不判断人群、不扩大范围）
+    cache           : 可选 dict（month → 特征表 / '_by_month' → 按月分片），跨次调用复用
+
+    行为
+    ----
+    - 训练：更早月份的「训练行为月 → 训练结果月」样本（该月全体用户，标签 = 次月是否购买），
+      特征统一为原始字段聚合（见 _lr_features），一个 LR 模型；
+    - 打分：只对 target_user_ids 打分；
+    - 排名：名次 = 这些用户内部按概率降序（1 ~ N，并列取最小名次）。
+
+    返回：DataFrame[user_id, Prob, Rank]，按 Rank 升序。
     """
-    LR 历史窗口打分（未购人群，严格无泄漏）——替代 score_nonbuyers 的演示版全量拟合。
+    # 目标用户去重（重复传入不影响结果）
+    target_ids = list(dict.fromkeys(target_user_ids))
+    if len(target_ids) == 0:
+        raise ValueError('target_user_ids 为空，无法打分。')
 
-    时间窗口（3 个月）：
-    - **训练**：score_month 之前所有 (特征月 → 次月标签) 的未购用户样本
-      （如打分 12 月 = 10→11 与 11→12 两批，即"上上个月 + 上个月"的活动）；
-    - **打分**：score_month 未购用户（当月特征），规则圈池 + LR 池内排序，
-      取池内前 top_ratio（默认 50%）；
-    - **结果**：score_month 的次月购买（训练时不可见）。
-
-    ⚠️ 备注：**10 月无法给出概率分**——10 月是最早的建模/EDA 月，没有
-    更早月份的历史行为可用于训练；10 月本身也不需要选人。打分最早从
-    11 月开始（用 10 月特征 + 11 月标签训练）。
-    cache：可选 dict（month → 特征表），跨打分月复用 build_features 结果。
-    """
-    # 参数默认值：未显式传入时用 config 里的候选池与 top 比例
-    if pool_segments is None:
-        pool_segments = POOL_SEGMENTS
-    if top_ratio is None:
-        top_ratio = POOL_TOP_RATIO
-
-    # ── 1. 用打分月之前的历史样本训练 LR（严格无泄漏）──
-    # 训练样本 = 各 (特征月 → 次月标签) 的未购用户；打分月当月的结果不可见
-    X_train, y_train = _history_train_samples(panel, score_month, buyer=False, cache=cache)
+    # ── 1. 训练（时间窗口由 LR_data_split 保证无泄漏）──
+    X_train, y_train = LR_data_split(panel, score_month, cache=cache)
     pipe = _lr_pipeline()
     pipe.fit(X_train, y_train)
 
-    # ── 2. 取打分月事件并构建当月特征 ──
+    # ── 2. 取打分月的用户级特征表（带按月分片与特征缓存）──
     if cache is not None and '_by_month' in cache:
-        # 复用缓存里的按月分片
         by_month = cache['_by_month']
     else:
-        # 首次：把 panel 按月切分成 {月名 -> 事件表}
         by_month = {}
         for m, g in panel.groupby('month'):
             by_month[m] = g
         if cache is not None:
             cache['_by_month'] = by_month
-    ev_sc = by_month.get(score_month)
     if cache is not None and score_month in cache:
-        # 该月特征已缓存 → 直接复用
         feats_sc = cache[score_month]
     else:
-        # 用打分月事件构建特征（观察期终点 = 当月最后一条事件时间）
+        ev_sc = by_month.get(score_month)
+        # 防御：该月没有事件数据
+        if ev_sc is None or ev_sc.empty:
+            raise ValueError(f'{score_month} 没有事件数据，无法打分。')
         feats_sc = build_features(ev_sc, ev_sc['event_time'].max())
         if cache is not None:
             cache[score_month] = feats_sc
 
-    # ── 3. 对打分月分层并取出未购用户 ──
-    seg_sc, _ = segment_users(feats_sc)
-    out = seg_sc.copy()
-    nb_mask = out['Purchase_Frequency'].eq(0)
-    nb = out.loc[nb_mask]
-    # 防御：打分月没有未购用户
-    if nb.empty:
-        raise ValueError(f'{score_month} 没有未购用户，无法打分。')
+    # ── 3. 只保留目标用户；有用户不在该月 → 直接报错，避免静默少打分 ──
+    target_set = set(target_ids)
+    is_target = feats_sc['user_id'].isin(target_set)
+    sub = feats_sc.loc[is_target]
+    missing = len(target_set) - len(sub)
+    if missing > 0:
+        raise ValueError(f'{missing} 个目标用户在 {score_month} 的特征表里不存在，无法打分。')
 
-    # ── 4. 打分：所有未购用户都给出首购概率分 ──
-    proba_full = pipe.predict_proba(_nonbuyer_lr_features(nb))
-    # 取"购买"那一类的概率（第 2 列）
+    # ── 4. 打分：只对目标用户输出概率 ──
+    proba_full = pipe.predict_proba(_lr_features(sub))
     proba = proba_full[:, 1]
 
-    # 三列先占位 NaN，再按人群填充
-    out['First_Purchase_Prob'] = np.nan
-    out['First_Purchase_Rank'] = np.nan
-    out['TopK_Flag'] = np.nan
-    out.loc[nb_mask, 'First_Purchase_Prob'] = proba
-
-    # 规则圈池：候选池 = 未购用户中规则认可的人群；Rank / TopK 只在池内计算
-    pool_mask = nb_mask & out['User_Segment'].isin(pool_segments)
-    pool_idx = out.loc[pool_mask].index
-    if len(pool_idx) > 0:
-        # 概率分转成以 nb 行为索引的 Series，再只取池内用户
-        proba_series = pd.Series(proba, index=nb.index)
-        pool_proba = proba_series.loc[pool_idx]
-        # 池内按概率降序排名（method='min'：并列给相同的最小名次）
-        ranks = pool_proba.rank(ascending=False, method='min')
-        # 优先触达人数 k = ceil(池内人数 × top_ratio)
-        k = int(np.ceil(len(pool_idx) * top_ratio))
-        out.loc[pool_idx, 'First_Purchase_Rank'] = ranks
-        # 池内前 k 名标记为 TopK（1），其余为 0
-        topk_mask = ranks <= k
-        out.loc[pool_idx, 'TopK_Flag'] = topk_mask.astype(int)
-    return out
-
-
-def score_buyers_history(panel: pd.DataFrame, score_month: str,
-                         pool_segments: list | None = None,
-                         segmented: pd.DataFrame | None = None,
-                         cache: dict | None = None) -> pd.DataFrame:
-    """
-    LR 历史窗口打分（已购人群，严格无泄漏）——替代 score_buyers 的演示版全量拟合。
-
-    时间窗口与 score_nonbuyers_history 一致（训练 = score_month 之前的
-    (特征月 → 次月复购标签) 已购样本；打分 = score_month 已购用户，池内排名）。
-    segmented：可选——传入 score_nonbuyers_history 的结果可在其上叠加复购分列
-    （否则内部重新对 score_month 分层）。
-    cache：可选 dict（month → 特征表），跨打分月复用 build_features 结果。
-    ⚠️ 备注：10 月无法给出概率分（无更早训练数据；10 月为建模月不需要选人）。
-    """
-    # 参数默认值：未显式传入时用 config 里的候选池
-    if pool_segments is None:
-        pool_segments = POOL_SEGMENTS
-
-    # ── 1. 用打分月之前的历史样本训练 LR（严格无泄漏）──
-    # 训练样本 = 各 (特征月 → 次月复购标签) 的已购用户
-    X_train, y_train = _history_train_samples(panel, score_month, buyer=True, cache=cache)
-    pipe = _lr_pipeline()
-    pipe.fit(X_train, y_train)
-
-    # ── 2. 准备打分月的分层结果（未传入时内部重新分层）──
-    if segmented is None:
-        # 调用方没传已分层结果 → 重新走"按月分片 → 构建特征 → 分层"流程
-        if cache is not None and '_by_month' in cache:
-            # 复用缓存里的按月分片
-            by_month = cache['_by_month']
-        else:
-            # 首次：把 panel 按月切分成 {月名 -> 事件表}
-            by_month = {}
-            for m, g in panel.groupby('month'):
-                by_month[m] = g
-            if cache is not None:
-                cache['_by_month'] = by_month
-        ev_sc = by_month.get(score_month)
-        if cache is not None and score_month in cache:
-            # 该月特征已缓存 → 直接复用
-            feats_sc = cache[score_month]
-        else:
-            # 用打分月事件构建特征（观察期终点 = 当月最后一条事件时间）
-            feats_sc = build_features(ev_sc, ev_sc['event_time'].max())
-            if cache is not None:
-                cache[score_month] = feats_sc
-        seg_sc, _ = segment_users(feats_sc)
-        out = seg_sc.copy()
-    else:
-        # 传入已有的 score_nonbuyers_history 结果：直接在其上叠加复购分列
-        out = segmented.copy()
-
-    # ── 3. 取出已购用户并打复购概率分 ──
-    buyer_mask = out['Purchase_Frequency'].gt(0)
-    buyer = out.loc[buyer_mask]
-    # 防御：打分月没有已购用户
-    if buyer.empty:
-        raise ValueError(f'{score_month} 没有已购用户，无法打分。')
-    proba_full = pipe.predict_proba(_buyer_lr_features(buyer))
-    # 取"复购"那一类的概率（第 2 列）
-    proba = proba_full[:, 1]
-
-    # 两列先占位 NaN，再按人群填充
-    out['Repurchase_Prob'] = np.nan
-    out['Repurchase_Rank'] = np.nan
-    out.loc[buyer_mask, 'Repurchase_Prob'] = proba
-
-    # 规则圈池：复购排名只在候选池内计算（非池用户保留概率分但 Rank 为 NaN）
-    pool_mask = buyer_mask & out['User_Segment'].isin(pool_segments)
-    pool_idx = out.loc[pool_mask].index
-    if len(pool_idx) > 0:
-        # 概率分转成以 buyer 行为索引的 Series，再只取池内用户
-        proba_series = pd.Series(proba, index=buyer.index)
-        pool_proba = proba_series.loc[pool_idx]
-        # 池内按概率降序排名（method='min'：并列给相同的最小名次）
-        ranks = pool_proba.rank(ascending=False, method='min')
-        out.loc[pool_idx, 'Repurchase_Rank'] = ranks
-    return out
+    # ── 5. 组内排名：名次只在这些目标用户内部计算（1 ~ N）──
+    out = pd.DataFrame({'user_id': sub['user_id'].to_numpy(), 'Prob': proba})
+    out['Rank'] = out['Prob'].rank(ascending=False, method='min')
+    return out.sort_values('Rank').reset_index(drop=True)
 
 
 def load_panel(path: Path | str = PANEL_FILE,
@@ -1207,7 +963,7 @@ def rolling_validation(df: pd.DataFrame,
 
     - 实验一（未购人群）：基期月 t 特征分层 → 观察月 t+1 购买（2 月对）；
     - 实验二（已购人群）：基期月 t 高价值买家 → 观察月 t+1 完全沉默（高价值高摩擦）
-       → 验证月 t+2 是否购买（3 月组，避免“沉默月=结果月”的循环定义）；
+       → 验证月 t+2 是否购买（3 月组，避免“沉默月 = 验证月”的循环定义）；
     返回 {'验证表': DataFrame}。
     注：LR 基准评估已移出本函数（需要时单独调用 nonbuyer_baseline / buyer_baseline）。
     """
@@ -1242,9 +998,9 @@ def rolling_validation(df: pd.DataFrame,
         potential = set(segmented.loc[segmented['User_Segment'] == '高潜力首购用户', 'user_id'])
         nonbuyer_control = set(segmented.loc[segmented['User_Segment'] == '普通浏览用户', 'user_id'])
         # 两组在观察月的购买率对比 + 显著性检验
-        res1 = rate_test(obs_events, potential, nonbuyer_control, f'{base_m}→{obs_m} 高潜力首购')
+        res1 = rolling_validation_rate_test(obs_events, potential, nonbuyer_control, f'{base_m}→{obs_m} 高潜力首购')
         row1 = {'训练月': base_m, '沉默月': '', '验证月': obs_m, '实验': '高潜力首购'}
-        # 把 rate_test 返回的各列指标并入这一行
+        # 把 rolling_validation_rate_test 返回的各列指标并入这一行
         row1.update(res1)
         rate_rows.append(row1)
 
@@ -1257,17 +1013,17 @@ def rolling_validation(df: pd.DataFrame,
                 print(f'跳过 {base_m}→{obs_m}→{out_m}（验证月无数据）')
                 continue
             # 用观察月事件标记"跨月完全沉默"的高价值用户（= 高价值高摩擦）
-            flagged = flag_buyer_silence(segmented, obs_events)
+            flagged = silent_buyer(segmented, obs_events)
             # 沉默组：高价值高摩擦用户；对照组：观察月仍活跃的高价值用户
             silent_vip = set(flagged.loc[flagged['User_Segment'] == '高价值高摩擦用户', 'user_id'])
             active_vip_mask = flagged['User_Segment'].isin(['高价值直购用户', '高价值深度互动用户'])
             active_vip = set(flagged.loc[active_vip_mask, 'user_id'])
-            # 两组在验证月（t+2）的购买率对比（避免"沉默月 = 结果月"的循环定义）
-            res2 = rate_test(out_events, silent_vip, active_vip,
+            # 两组在验证月（t+2）的购买率对比（避免"沉默月 = 验证月"的循环定义）
+            res2 = rolling_validation_rate_test(out_events, silent_vip, active_vip,
                              f'{base_m}(基期)→{obs_m}(沉默)→{out_m}(验证) 高价值高摩擦')
             row2 = {'训练月': base_m, '沉默月': obs_m, '验证月': out_m,
                     '实验': '高价值高摩擦(沉默)'}
-            # 把 rate_test 返回的各列指标并入这一行
+            # 把 rolling_validation_rate_test 返回的各列指标并入这一行
             row2.update(res2)
             rate_rows.append(row2)
 

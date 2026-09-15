@@ -15,9 +15,8 @@ import pandas as pd
 
 from analysis import (build_features, buyer_baseline, cohort_migration,
                       Friction_and_Exploration, export_tracking, F_and_E_scalers,
-                      flag_buyer_silence, gmm_intersection_threshold, load_panel, rate_test,
-                      rolling_validation, score_buyers, score_buyers_history,
-                      score_nonbuyers, score_nonbuyers_history, segment_users)
+                      silent_buyer, gmm, load_panel, rolling_validation_rate_test,
+                      rolling_validation, LR_predict_rank, segment_users)
 
 
 def make_events(n_users: int = 6) -> pd.DataFrame:
@@ -48,16 +47,16 @@ def make_events(n_users: int = 6) -> pd.DataFrame:
 class TestGmmIntersectionThreshold(unittest.TestCase):
     def test_constant_series_returns_median(self):
         s = pd.Series([5.0] * 60)
-        self.assertEqual(gmm_intersection_threshold(s), 5.0)
+        self.assertEqual(gmm(s), 5.0)
 
     def test_small_sample_returns_median(self):
         s = pd.Series([1.0, 2.0, 3.0, 4.0])
-        self.assertEqual(gmm_intersection_threshold(s), float(np.median([1, 2, 3, 4])))
+        self.assertEqual(gmm(s), float(np.median([1, 2, 3, 4])))
 
     def test_zero_inflated_guard_positive(self):
         # 大量 0 值 + 少量正值的零膨胀序列：阈值应 > 0（有加购即高摩擦）
         s = pd.Series([0.0] * 100 + [0.693, 1.099, 1.386, 1.609])
-        cut = gmm_intersection_threshold(s)
+        cut = gmm(s)
         self.assertGreater(cut, 0.0)
         self.assertLessEqual(cut, min(x for x in s if x > 0))
 
@@ -188,7 +187,7 @@ class TestFlagBuyerSilence(unittest.TestCase):
         obs_ids = [1, 2, 4, 5]
         obs = pd.DataFrame({'user_id': obs_ids, 'event_type': ['view'] * len(obs_ids),
                             'event_time': [pd.Timestamp('2019-11-01')] * len(obs_ids)})
-        flagged = flag_buyer_silence(seg, obs)
+        flagged = silent_buyer(seg, obs)
         silent = flagged[flagged['User_Segment'] == '高价值高摩擦用户']
         self.assertGreater(len(silent), 0)
         # 沉默者 = 基期高价值用户且不在观察月
@@ -205,7 +204,7 @@ class TestRateTest(unittest.TestCase):
             'user_id': [1, 2, 3, 4, 5],
             'event_type': ['purchase', 'purchase', 'view', 'view', 'view'],
         })
-        res = rate_test(nov, {1, 2, 3}, {4, 5}, '测试组：购买率验证')
+        res = rolling_validation_rate_test(nov, {1, 2, 3}, {4, 5}, '测试组：购买率验证')
         self.assertEqual(res['目标人数'], 3)
         self.assertEqual(res['对照人数'], 2)
         self.assertAlmostEqual(res['目标购买率'], 2 / 3)
@@ -213,66 +212,8 @@ class TestRateTest(unittest.TestCase):
         self.assertTrue(res['p值'] >= 0)
 
 
-class TestScoreNonbuyers(unittest.TestCase):
-    def test_columns_and_topk_flag(self):
-        events = make_events(12)
-        feats = build_features(events, events['event_time'].max())
-        seg, _ = segment_users(feats)
-        nov = pd.DataFrame({'user_id': [0, 1], 'event_type': ['purchase', 'purchase']})
-        out = score_nonbuyers(seg, nov)
-        for col in ['First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag']:
-            self.assertIn(col, out.columns)
-        # 规则圈池 + LR 池内排序：TopK_Flag 标记池内前 50%（k = ceil(池内人数 × 0.5)）
-        pool_n = int((out['User_Segment'] == '高潜力首购用户').sum())   # 未购候选池 = 高潜力首购
-        self.assertGreater(pool_n, 0)
-        expected_k = int(np.ceil(pool_n * 0.5))
-        # 至少标记 k 人（并列 rank 时可能略多于 k，如小样本合成数据概率相同），且不超过池内总人数
-        self.assertGreaterEqual(int(out['TopK_Flag'].sum()), expected_k)
-        self.assertLessEqual(int(out['TopK_Flag'].sum()), pool_n)
-        # 池内排名从 1 开始、不超过池内人数
-        ranks = out.loc[out['User_Segment'] == '高潜力首购用户', 'First_Purchase_Rank'].dropna().to_numpy()
-        self.assertEqual(ranks.min(), 1)                     # min-rank：并列取同 rank
-        self.assertLessEqual(ranks.max(), pool_n)
-        self.assertTrue(np.allclose(ranks, ranks.astype(int)))
-        # 不在池内的用户（普通浏览）Rank / TopK_Flag 为 NaN，但概率分仍给出
-        browse = out[out['User_Segment'] == '普通浏览用户']
-        self.assertTrue(browse['First_Purchase_Rank'].isna().all())
-        self.assertTrue(browse['TopK_Flag'].isna().all())
-        self.assertFalse(browse['First_Purchase_Prob'].isna().all())
-
-
-class TestScoreBuyers(unittest.TestCase):
-    def test_columns_and_ranks(self):
-        rng = np.random.default_rng(7)
-        n = 20
-        freq = rng.integers(1, 6, n)
-        freq[0] = 0
-        df = pd.DataFrame({
-            'user_id': np.arange(n),
-            'Purchase_Frequency': freq,
-            'Total_Spending': rng.uniform(50, 5000, n),
-            'Recency_Days': rng.integers(1, 31, n),
-            'Pages_Viewed': rng.integers(1, 200, n),
-            'Estimated_Time': rng.uniform(100, 20000, n),
-            'Session_Count': rng.integers(1, 10, n),
-            'Cart_Products': rng.integers(0, 8, n),
-            'User_Segment': ['高潜力首购用户'] * n,
-        })
-        nov_ids = df[df['Purchase_Frequency'] > 0]['user_id'].sample(frac=0.5, random_state=1)
-        nov = pd.DataFrame({'user_id': nov_ids, 'event_type': ['purchase'] * len(nov_ids)})
-
-        out = score_buyers(df, nov)
-        for col in ['Repurchase_Prob', 'Repurchase_Rank']:
-            self.assertIn(col, out.columns)
-        buyer = out[out['Purchase_Frequency'] > 0]
-        ranks = buyer['Repurchase_Rank'].dropna().to_numpy()
-        self.assertEqual(ranks.min(), 1)
-        self.assertLessEqual(ranks.max(), len(ranks))
-        self.assertTrue(out[out['Purchase_Frequency'].eq(0)]['Repurchase_Prob'].isna().all())
-
-
-class TestScoreHistory(unittest.TestCase):
-    """LR 历史窗口打分（无泄漏）：训练 = 打分月之前的历史，10 月无法打分。"""
+class TestLRPredictRank(unittest.TestCase):
+    """纯工具 LR_predict_rank：对指定用户预测『预测月』购买概率并在其内部排名。"""
 
     def _panel(self):
         frames = []
@@ -290,43 +231,75 @@ class TestScoreHistory(unittest.TestCase):
             frames.append(ev)
         return pd.concat(frames, ignore_index=True)
 
-    def test_nonbuyers_history_scoring(self):
+    def test_predict_rank_nonbuyers(self):
+        # 未购用户：返回 Prob / Rank；名次在传入用户内部算（1 起步，并列取最小名次）
         panel = self._panel()
-        out = score_nonbuyers_history(panel, '2019-11')
-        for col in ['First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag']:
-            self.assertIn(col, out.columns)
-        pool_n = int((out['User_Segment'] == '高潜力首购用户').sum())
-        self.assertGreater(pool_n, 0)
-        expected_k = int(np.ceil(pool_n * 0.5))
-        # 池内前 50%（并列 rank 时可能略多），且不超过池内总人数
-        self.assertGreaterEqual(int(out['TopK_Flag'].sum()), expected_k)
-        self.assertLessEqual(int(out['TopK_Flag'].sum()), pool_n)
-        # 不在池内（普通浏览）无 Rank / Flag
-        browse = out[out['User_Segment'] == '普通浏览用户']
-        self.assertTrue(browse['First_Purchase_Rank'].isna().all())
+        target = [0, 3, 6, 9]
+        out = LR_predict_rank(panel, '2019-11', target)
+        self.assertEqual(list(out.columns), ['user_id', 'Prob', 'Rank'])
+        self.assertEqual(set(out['user_id']), set(target))
+        self.assertEqual(len(out), len(target))
+        self.assertEqual(int(out['Rank'].min()), 1)
+        self.assertLessEqual(int(out['Rank'].max()), len(target))
+        self.assertTrue(out['Prob'].between(0, 1).all())
+        # 名次与概率单调一致：概率更高者名次更靠前；概率相同则名次相同
+        for _, r1 in out.iterrows():
+            for _, r2 in out.iterrows():
+                if r1['Prob'] > r2['Prob']:
+                    self.assertLess(r1['Rank'], r2['Rank'])
+                elif r1['Prob'] == r2['Prob']:
+                    self.assertEqual(r1['Rank'], r2['Rank'])
 
-    def test_buyers_history_scoring(self):
+    def test_predict_rank_buyers(self):
+        # 已购用户：同一工具、同一输出契约（函数不区分人群）
         panel = self._panel()
-        out = score_buyers_history(panel, '2019-11')
-        self.assertIn('Repurchase_Prob', out.columns)
-        buyer = out[out['Purchase_Frequency'].gt(0)]
-        self.assertFalse(buyer['Repurchase_Prob'].isna().all())
+        target = [1, 4, 7, 10]
+        out = LR_predict_rank(panel, '2019-11', target)
+        self.assertEqual(list(out.columns), ['user_id', 'Prob', 'Rank'])
+        self.assertEqual(set(out['user_id']), set(target))
+        self.assertEqual(int(out['Rank'].min()), 1)
+        self.assertLessEqual(int(out['Rank'].max()), len(target))
+
+    def test_predict_rank_subset_is_internal(self):
+        # 只传子集时，名次在子集内部计算（不会因外部用户而变大），且相对次序与全集一致
+        panel = self._panel()
+        full = LR_predict_rank(panel, '2019-11', [0, 1, 3, 6, 9])
+        sub = LR_predict_rank(panel, '2019-11', [0, 6])
+        self.assertEqual(len(sub), 2)
+        self.assertEqual(int(sub['Rank'].min()), 1)
+        self.assertLessEqual(int(sub['Rank'].max()), 2)
+        full_prob = dict(zip(full['user_id'], full['Prob']))
+        sub_prob = dict(zip(sub['user_id'], sub['Prob']))
+        for a in sub_prob:
+            for b in sub_prob:
+                self.assertEqual(full_prob[a] > full_prob[b], sub_prob[a] > sub_prob[b])
 
     def test_october_cannot_score(self):
-        # 10 月是最早建模月，没有更早训练数据 → 无法给出概率分
+        # 10 月是最早建模月，没有更早的训练月份 → 抛 ValueError
         panel = self._panel()
         with self.assertRaises(ValueError):
-            score_nonbuyers_history(panel, '2019-10')
+            LR_predict_rank(panel, '2019-10', [0, 1])
+
+    def test_unknown_target_user_raises(self):
+        # 目标用户不在打分月的特征表里 → 报错而不是静默少打分
+        panel = self._panel()
         with self.assertRaises(ValueError):
-            score_buyers_history(panel, '2019-10')
+            LR_predict_rank(panel, '2019-11', [99999])
+        with self.assertRaises(ValueError):
+            LR_predict_rank(panel, '2019-11', [])
+
     def test_columns(self):
         events = make_events(10)
         feats = build_features(events, events['event_time'].max())
         seg, _ = segment_users(feats)
         nov = pd.DataFrame({'user_id': [0, 1], 'event_type': ['purchase', 'purchase']})
-        seg = flag_buyer_silence(seg, nov)
-        seg = score_nonbuyers(seg, nov)
-        seg = score_buyers(seg, nov)
+        seg = silent_buyer(seg, nov)
+        # 概率列由打分函数产出；这里只测 export_tracking 的列契约，直接赋值即可
+        seg['First_Purchase_Prob'] = 0.1
+        seg['First_Purchase_Rank'] = np.nan
+        seg['TopK_Flag'] = np.nan
+        seg['Repurchase_Prob'] = np.nan
+        seg['Repurchase_Rank'] = np.nan
         track = export_tracking(seg)
         for col in ['user_id', 'User_Segment', 'Exploration', 'Friction', 'Value_Index',
                     'First_Purchase_Prob', 'First_Purchase_Rank', 'TopK_Flag',
@@ -342,9 +315,13 @@ class TestScoreHistory(unittest.TestCase):
         feats = build_features(events, events['event_time'].max())
         seg, _ = segment_users(feats)
         nov = pd.DataFrame({'user_id': [0, 1], 'event_type': ['purchase', 'purchase']})
-        seg = flag_buyer_silence(seg, nov)
-        seg = score_nonbuyers(seg, nov)
-        seg = score_buyers(seg, nov)
+        seg = silent_buyer(seg, nov)
+        # 概率列由打分函数产出；这里只测 export_tracking 的列契约，直接赋值即可
+        seg['First_Purchase_Prob'] = 0.1
+        seg['First_Purchase_Rank'] = np.nan
+        seg['TopK_Flag'] = np.nan
+        seg['Repurchase_Prob'] = np.nan
+        seg['Repurchase_Rank'] = np.nan
         cand = export_tracking(seg, segments=['高潜力首购用户', '高价值高摩擦用户'])
         self.assertTrue(set(cand['User_Segment']) <= {'高潜力首购用户', '高价值高摩擦用户'})
         self.assertLess(len(cand), len(seg))
