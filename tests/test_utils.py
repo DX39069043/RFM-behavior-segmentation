@@ -13,10 +13,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 
-from analysis import (build_features, buyer_baseline, cohort_migration,
-                      Friction_and_Exploration, export_tracking, F_and_E_scalers,
-                      silent_buyer, gmm, load_panel, rolling_validation_rate_test,
-                      rolling_validation, LR_predict_rank, segment_users)
+from analysis import (build_features, build_month_tables, buyer_baseline,
+                      cohort_migration, Friction_and_Exploration, export_tracking,
+                      F_and_E_scalers, silent_buyer, gmm, load_panel,
+                      rolling_validation_rate_test, rolling_validation,
+                      LR_predict_rank, build_user_segment)
 
 
 def make_events(n_users: int = 6) -> pd.DataFrame:
@@ -167,7 +168,7 @@ class TestSegmentUsers(unittest.TestCase):
     def test_segments_exhaustive(self):
         events = make_events(8)
         feats = build_features(events, events['event_time'].max())
-        seg, meta = segment_users(feats)
+        seg, meta = build_user_segment(feats)
         self.assertEqual(len(seg), len(feats))
         self.assertTrue(seg['User_Segment'].isin(
             ['高潜力首购用户', '普通浏览用户', '常规已购用户', '高价值直购用户',
@@ -182,12 +183,10 @@ class TestFlagBuyerSilence(unittest.TestCase):
     def test_silent_vip_flagged(self):
         events = make_events(12)
         feats = build_features(events, events['event_time'].max())
-        seg, _ = segment_users(feats)
-        # 观察月只包含部分买家（1,2,4,5），其余买家（7,8,10,11）完全沉默
-        obs_ids = [1, 2, 4, 5]
-        obs = pd.DataFrame({'user_id': obs_ids, 'event_type': ['view'] * len(obs_ids),
-                            'event_time': [pd.Timestamp('2019-11-01')] * len(obs_ids)})
-        flagged = silent_buyer(seg, obs)
+        seg, _ = build_user_segment(feats)
+        # 观察月有活动的人（没有活动 = 沉默）
+        obs_ids = {1, 2, 4, 5}
+        flagged = silent_buyer(seg, obs_ids)
         silent = flagged[flagged['User_Segment'] == '高价值高摩擦用户']
         self.assertGreater(len(silent), 0)
         # 沉默者 = 基期高价值用户且不在观察月
@@ -200,11 +199,9 @@ class TestFlagBuyerSilence(unittest.TestCase):
 
 class TestRateTest(unittest.TestCase):
     def test_known_contingency(self):
-        nov = pd.DataFrame({
-            'user_id': [1, 2, 3, 4, 5],
-            'event_type': ['purchase', 'purchase', 'view', 'view', 'view'],
-        })
-        res = rolling_validation_rate_test(nov, {1, 2, 3}, {4, 5}, '测试组：购买率验证')
+        # 验证月买过的人（1、2 买了，3、4、5 没买）
+        purchased_ids = {1, 2}
+        res = rolling_validation_rate_test(purchased_ids, {1, 2, 3}, {4, 5}, '测试组：购买率验证')
         self.assertEqual(res['目标人数'], 3)
         self.assertEqual(res['对照人数'], 2)
         self.assertAlmostEqual(res['目标购买率'], 2 / 3)
@@ -231,11 +228,15 @@ class TestLRPredictRank(unittest.TestCase):
             frames.append(ev)
         return pd.concat(frames, ignore_index=True)
 
+    def _tables(self):
+        """把合成面板整理成 {月份: 该月表}（与 notebook 走同一条构造路径）。"""
+        return build_month_tables(self._panel(), ['2019-10', '2019-11', '2019-12'])
+
     def test_predict_rank_nonbuyers(self):
         # 未购用户：返回 Prob / Rank；名次在传入用户内部算（1 起步，并列取最小名次）
-        panel = self._panel()
+        tables = self._tables()
         target = [0, 3, 6, 9]
-        out = LR_predict_rank(panel, '2019-11', target)
+        out = LR_predict_rank(tables, '2019-11', target)
         self.assertEqual(list(out.columns), ['user_id', 'Prob', 'Rank'])
         self.assertEqual(set(out['user_id']), set(target))
         self.assertEqual(len(out), len(target))
@@ -252,9 +253,9 @@ class TestLRPredictRank(unittest.TestCase):
 
     def test_predict_rank_buyers(self):
         # 已购用户：同一工具、同一输出契约（函数不区分人群）
-        panel = self._panel()
+        tables = self._tables()
         target = [1, 4, 7, 10]
-        out = LR_predict_rank(panel, '2019-11', target)
+        out = LR_predict_rank(tables, '2019-11', target)
         self.assertEqual(list(out.columns), ['user_id', 'Prob', 'Rank'])
         self.assertEqual(set(out['user_id']), set(target))
         self.assertEqual(int(out['Rank'].min()), 1)
@@ -262,9 +263,9 @@ class TestLRPredictRank(unittest.TestCase):
 
     def test_predict_rank_subset_is_internal(self):
         # 只传子集时，名次在子集内部计算（不会因外部用户而变大），且相对次序与全集一致
-        panel = self._panel()
-        full = LR_predict_rank(panel, '2019-11', [0, 1, 3, 6, 9])
-        sub = LR_predict_rank(panel, '2019-11', [0, 6])
+        tables = self._tables()
+        full = LR_predict_rank(tables, '2019-11', [0, 1, 3, 6, 9])
+        sub = LR_predict_rank(tables, '2019-11', [0, 6])
         self.assertEqual(len(sub), 2)
         self.assertEqual(int(sub['Rank'].min()), 1)
         self.assertLessEqual(int(sub['Rank'].max()), 2)
@@ -276,24 +277,24 @@ class TestLRPredictRank(unittest.TestCase):
 
     def test_october_cannot_score(self):
         # 10 月是最早建模月，没有更早的训练月份 → 抛 ValueError
-        panel = self._panel()
+        tables = self._tables()
         with self.assertRaises(ValueError):
-            LR_predict_rank(panel, '2019-10', [0, 1])
+            LR_predict_rank(tables, '2019-10', [0, 1])
 
     def test_unknown_target_user_raises(self):
         # 目标用户不在打分月的特征表里 → 报错而不是静默少打分
-        panel = self._panel()
+        tables = self._tables()
         with self.assertRaises(ValueError):
-            LR_predict_rank(panel, '2019-11', [99999])
+            LR_predict_rank(tables, '2019-11', [99999])
         with self.assertRaises(ValueError):
-            LR_predict_rank(panel, '2019-11', [])
+            LR_predict_rank(tables, '2019-11', [])
 
     def test_columns(self):
         events = make_events(10)
         feats = build_features(events, events['event_time'].max())
-        seg, _ = segment_users(feats)
-        nov = pd.DataFrame({'user_id': [0, 1], 'event_type': ['purchase', 'purchase']})
-        seg = silent_buyer(seg, nov)
+        seg, _ = build_user_segment(feats)
+        # 观察月活跃用户（0、1 有活动 → 不会被判为沉默）
+        seg = silent_buyer(seg, {0, 1})
         # 概率列由打分函数产出；这里只测 export_tracking 的列契约，直接赋值即可
         seg['First_Purchase_Prob'] = 0.1
         seg['First_Purchase_Rank'] = np.nan
@@ -313,9 +314,9 @@ class TestLRPredictRank(unittest.TestCase):
         # 传入 segments 时只导出指定标签（候选触达名单 = 高潜力首购 + 高价值高摩擦）
         events = make_events(10)
         feats = build_features(events, events['event_time'].max())
-        seg, _ = segment_users(feats)
-        nov = pd.DataFrame({'user_id': [0, 1], 'event_type': ['purchase', 'purchase']})
-        seg = silent_buyer(seg, nov)
+        seg, _ = build_user_segment(feats)
+        # 观察月活跃用户（0、1 有活动 → 不会被判为沉默）
+        seg = silent_buyer(seg, {0, 1})
         # 概率列由打分函数产出；这里只测 export_tracking 的列契约，直接赋值即可
         seg['First_Purchase_Prob'] = 0.1
         seg['First_Purchase_Rank'] = np.nan
@@ -372,7 +373,10 @@ class TestRollingValidation(unittest.TestCase):
             ev['month'] = month
             frames.append(ev)
         panel = pd.concat(frames, ignore_index=True)
-        res = rolling_validation(panel, months=['2019-10', '2019-11', '2019-12', '2020-01'])
+        months = ['2019-10', '2019-11', '2019-12', '2020-01']
+        # 滚动验证直接收"月份表"（不再收 panel + cache）
+        tables = build_month_tables(panel, months)
+        res = rolling_validation(tables, months)
         rates = res['验证表']
         # 实验一：3 个月对（2 月窗口）；实验二：2 个月组（基期→沉默→验证，3 月窗口）
         exp1 = rates[rates['实验'] == '高潜力首购']
@@ -435,9 +439,9 @@ class TestCohortMigration(unittest.TestCase):
         panel = self._panel()
         oct_events = panel[panel['month'].eq('2019-10')]
         nov_events = panel[panel['month'].eq('2019-11')]
-        seg_oct, thr = segment_users(build_features(oct_events, oct_events['event_time'].max()))
-        seg_nov_frozen, _ = segment_users(build_features(nov_events, nov_events['event_time'].max()),
-                                          thresholds=thr)
+        seg_oct, thr = build_user_segment(build_features(oct_events, oct_events['event_time'].max()))
+        seg_nov_frozen, _ = build_user_segment(build_features(nov_events, nov_events['event_time'].max()),
+                                               thresholds=thr)
         self.assertNotIn('vip_log_friction1_cutoff', thr)
         self.assertEqual(len(seg_nov_frozen), len(nov_events['user_id'].unique()))
 

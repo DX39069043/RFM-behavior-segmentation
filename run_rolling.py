@@ -5,7 +5,7 @@
 需要时可单独调用；历史基准结果保留在 rolling_baseline_results.csv。
 """
 from config import MONTHS, OUTPUT_ROLLING, PANEL_FILE
-from analysis import load_panel, rolling_validation
+from analysis import build_month_tables, load_panel, rolling_validation
 
 # 分析只需要这 7 列；category_code / brand 等字符串列不读，省 IO 与内存
 PANEL_COLUMNS = ['event_time', 'event_type', 'price', 'product_id',
@@ -17,8 +17,11 @@ def main() -> None:
     panel = load_panel(PANEL_FILE, months=MONTHS, columns=PANEL_COLUMNS)
     print(f'面板: {len(panel):,} 行, {panel["user_id"].nunique():,} 用户')
 
+    # 面板 → 月份表（特征 + 当月独立分层；不落盘，本次运行内存里用完即弃）
+    tables = build_month_tables(panel, MONTHS)
+
     # 逐月对执行时间外验证（实验一：未购人群；实验二：已购沉默人群）
-    res = rolling_validation(panel)
+    res = rolling_validation(tables, MONTHS)
     rates = res['验证表']
 
     # 结果落盘（utf-8-sig 带 BOM，Excel 打开中文不乱码）

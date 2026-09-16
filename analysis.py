@@ -250,8 +250,8 @@ def gmm(series: pd.Series,
     return cut
 
 
-def segment_users(features: pd.DataFrame,
-                  thresholds: dict | None = None) -> tuple[pd.DataFrame, dict]:
+def build_user_segment(features: pd.DataFrame,
+                       thresholds: dict | None = None) -> tuple[pd.DataFrame, dict]:
     """
     对用户进行精准分层
     以“是否已购”为首要业务边界：
@@ -348,45 +348,29 @@ def segment_users(features: pd.DataFrame,
     return df, metadata
 
 
-def silent_buyer(segmented: pd.DataFrame, obs_events: pd.DataFrame) -> pd.DataFrame:
+def silent_buyer(segmented: pd.DataFrame, active_user_ids) -> pd.DataFrame:
     """
     已购人群“跨月沉默”高摩擦标记（流失判定）。
 
     基期的高价值用户（高价值直购 / 深度互动）在观察月完全无任何事件
     （view / cart / purchase 都没有）→ 标记为“高价值高摩擦用户”（= 沉默/流失）。
     未购用户与其他人群不受影响。
+
+    active_user_ids：观察月里出现过（有任何事件）的 user_id 集合。
     """
     # 在副本上操作，避免影响调用方
     out = segmented.copy()
-    # 防御：观察月没有事件时无法判断用户"是否出现过"
-    if obs_events.empty:
-        raise ValueError('观察月没有事件数据，无法判定沉默。')
     # 观察月里有任何事件的 user_id 集合（view / cart / purchase 都算"有活动"）
-    obs_users = set(obs_events['user_id'])
+    active = set(active_user_ids)
+    # 防御：观察月一个人都没出现时，无法判断"谁没出现"
+    if len(active) == 0:
+        raise ValueError('观察月没有活跃用户，无法判定沉默。')
     # 只看基期的高价值人群：高价值直购 / 高价值深度互动
     vip_mask = out['User_Segment'].isin(['高价值直购用户', '高价值深度互动用户'])
     # 高价值用户若在观察月完全没有事件 → 标记为"高价值高摩擦用户"（沉默/流失）
-    silence_mask = vip_mask & ~out['user_id'].isin(obs_users)
+    silence_mask = vip_mask & ~out['user_id'].isin(active)
     out.loc[silence_mask, 'User_Segment'] = '高价值高摩擦用户'
     return out
-
-
-def segment_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    返回简历/汇报可直接引用的人群概览
-    """
-    # 按人群分组聚合：每组的人数与各项均值指标
-    grouped = df.groupby('User_Segment', as_index=False).agg(
-        用户数=('user_id', 'size'), 平均消费=('Total_Spending', 'mean'),
-        平均购买频次=('Purchase_Frequency', 'mean'), 平均探索度=('Exploration', 'mean'),
-        平均摩擦力=('Friction', 'mean'))
-    # 用户占比 = 各组人数 / 全体人数（注意：未购用户的消费/频次均值本身为 0，展示上自然偏低）
-    total_users = grouped['用户数'].sum()
-    grouped['用户占比'] = grouped['用户数'] / total_users
-    # 按人数从多到少排序，方便汇报里先看大盘
-    summary = grouped.sort_values('用户数', ascending=False)
-    return summary
-
 
 def proportion_ci(successes: int, total: int) -> tuple[float, float]:
     """Wilson 95% CI，避免小比例下的 Wald 区间失真。"""
@@ -407,16 +391,17 @@ def proportion_ci(successes: int, total: int) -> tuple[float, float]:
     return centre - half, centre + half
 
 
-def rolling_validation_rate_test(obs_events: pd.DataFrame,
+def rolling_validation_rate_test(purchased_ids: set,
                                  treatment_ids: set,
                                  control_ids: set,
                                  title: str) -> dict:
-    """两组 11 月购买率对比：卡方检验（Yates 校正）+ Wilson 95% CI。
+    """两组验证月购买率对比：卡方检验（Yates 校正）+ Wilson 95% CI。
 
+    purchased_ids：验证月里实际发生购买的用户集合。
     当期望频数含 0（样本过小或某组无事件）导致卡方失效时，回退 Fisher 精确检验。
     """
     # 验证月里实际发生购买的 user_id 集合
-    buyers = set(obs_events.loc[obs_events['event_type'] == 'purchase', 'user_id'])
+    buyers = set(purchased_ids)
     # 目标组（treatment）与对照组（control）中分别有多少人购买了
     a = len(treatment_ids & buyers)
     b = len(control_ids & buyers)
@@ -484,7 +469,7 @@ def export_tracking(segmented: pd.DataFrame, path: Path | str | None = None,
     return tracking
 
 
-def _lr_features(frame: pd.DataFrame) -> np.ndarray:
+def _lr_features_matrix(frame: pd.DataFrame) -> np.ndarray:
     """LR 的统一特征矩阵：log1p(原始字段聚合，共 7 维)。
 
     只用原始数据里的字段聚合——消费额 / 购买频次 / 最近购买天数，
@@ -508,11 +493,6 @@ def _lr_features(frame: pd.DataFrame) -> np.ndarray:
                        pages_log, time_log, sessions_log, cart_log]
     x_matrix = np.column_stack(feature_columns)
     return x_matrix
-
-
-_LR_FEATURE_NAMES = ['log1p(Total_Spending)', 'log1p(Purchase_Frequency)', 'log1p(Recency_Days)',
-                     'log1p(Pages_Viewed)', 'log1p(Estimated_Time)', 'log1p(Session_Count)',
-                     'log1p(Cart_Products)']
 
 
 def nonbuyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
@@ -547,7 +527,7 @@ def nonbuyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
 
     # ── 2. 特征矩阵与规则标记 ──
     # 完整特征矩阵（统一 7 维：原始购买字段 + 原始行为字段）
-    x_full = _lr_features(nb)
+    x_full = _lr_features_matrix(nb)
     # 只含浏览三指标（第 4~6 列，用于对比"仅浏览特征"能到多少 AUC）
     x_vol = x_full[:, 3:6]
     # 规则标记：规则分层命中的"高潜力首购用户"记为 1
@@ -592,8 +572,10 @@ def nonbuyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
 
     # ── 5. 全量拟合一次，输出各特征系数（业务解释用）──
     pipe.fit(x_full, y)
-    # 特征名与系数一一对应
-    coef_names = _LR_FEATURE_NAMES
+    # 特征名与系数一一对应（列序与 _lr_features 一致）
+    coef_names = ['log1p(Total_Spending)', 'log1p(Purchase_Frequency)', 'log1p(Recency_Days)',
+                  'log1p(Pages_Viewed)', 'log1p(Estimated_Time)', 'log1p(Session_Count)',
+                  'log1p(Cart_Products)']
     coef_values = pipe.named_steps['logisticregression'].coef_[0]
     coef = {}
     for name, value in zip(coef_names, coef_values):
@@ -674,7 +656,7 @@ def buyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
 
     # ── 2. 特征矩阵、规则标记与手工价值指数 ──
     # 完整特征矩阵（统一 7 维）
-    x_full = _lr_features(buyer)
+    x_full = _lr_features_matrix(buyer)
     # 规则标记：被标记为"高价值高摩擦"（跨月沉默）的用户记为 1
     is_silent = buyer['User_Segment'].eq('高价值高摩擦用户')
     rule_int = is_silent.astype(int)
@@ -719,7 +701,11 @@ def buyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
     pipe.fit(x_full, y)
     coef_values = pipe.named_steps['logisticregression'].coef_[0]
     coef = {}
-    for name, value in zip(_LR_FEATURE_NAMES, coef_values):
+    # 特征名与系数一一对应（列序与 _lr_features 一致）
+    coef_names = ['log1p(Total_Spending)', 'log1p(Purchase_Frequency)', 'log1p(Recency_Days)',
+                  'log1p(Pages_Viewed)', 'log1p(Estimated_Time)', 'log1p(Session_Count)',
+                  'log1p(Cart_Products)']
+    for name, value in zip(coef_names, coef_values):
         coef[name] = float(value)
 
     # ── 6. Bootstrap：LR AUC − 规则 AUC 的 95% 置信区间 ──
@@ -770,127 +756,64 @@ def _next_month(m: str) -> str:
     return f'{year:04d}-{month + 1:02d}'
 
 
-def _month_slices(panel: pd.DataFrame,
-                  cache: dict | None) -> dict:
+def build_month_tables(panel: pd.DataFrame,
+                       months: list,
+                       cache_dir: Path | str | None = None) -> dict:
+    """把事件面板整理成"每月一张表"：返回 {月份: 该月用户表}。
 
-    """把面板按月分片成 {月名 -> 事件表}；带缓存（cache['_by_month']），避免反复全表过滤。"""
-    if cache is not None and '_by_month' in cache:
-        return cache['_by_month']
-    by_month = {}
-    for m, g in panel.groupby('month'):
-        by_month[m] = g
-    if cache is not None:
-        cache['_by_month'] = by_month
-    return by_month
+    每张表 = 该月用户特征（12 列）+ 该月"当月独立分层"标签（Value_Index /
+    Base_Segment / User_Segment），一个月一个文件（month_YYYY-MM.parquet）。
 
+    cache_dir 为 None 时只算不落盘（合成数据 / 命令行入口用）；
+    传入目录时：有缓存文件直接读，没有才现算并落盘（首次约 40 秒/月）。
 
-def _month_features(events: pd.DataFrame,
-                    month: str,
-                    cache: dict | None,
-                    return_scalers: bool = False):
-    """取某月用户特征表；带缓存（cache[month]），避免每月重复 build_features（约 40 秒/月）。
-
-    return_scalers=True 时返回 (特征表, 标准化器)：标准化器缓存在 cache['_scalers']。
+    注意：这里的分层是"每月独立拟合阈值"的口径；队列迁移用的是"冻结基期阈值 +
+    冻结标准化器"的另一套，两者不可混用。
     """
-    if cache is not None and month in cache:
-        feats = cache[month]
-        if not return_scalers:
-            return feats
-        scalers = cache.get('_scalers')
-        # 缓存里没有标准化器 → 用缓存的特征表补拟合一次，保证返回值完整
-        if scalers is None:
-            scalers = F_and_E_scalers(feats)
-            cache['_scalers'] = scalers
-        return feats, scalers
-    if return_scalers:
-        feats, scalers = build_features(events, events['event_time'].max(), return_scalers=True)
-        if cache is not None:
-            cache[month] = feats
-            cache['_scalers'] = scalers
-        return feats, scalers
-    feats = build_features(events, events['event_time'].max())
-    if cache is not None:
-        cache[month] = feats
-    return feats
-
-
-def _month_segments(feats: pd.DataFrame, month: str, cache: dict | None) -> pd.DataFrame:
-    """取某月『当月独立分层』结果；带缓存（cache['_segments'][month]）。
-
-    注意：这里缓存的是"每月独立拟合阈值"的分层结果，供打分 / 滚动验证使用；
-    队列迁移用的是"冻结基期阈值 + 冻结标准化器"的另一套结果，两者不可混用。
-    """
-    if cache is None:
-        return segment_users(feats)[0]
-    segs = cache.setdefault('_segments', {})
-    if month in segs:
-        return segs[month]
-    seg = segment_users(feats)[0]
-    segs[month] = seg
-    return seg
-
-
-def _LR_data_split(panel: pd.DataFrame,
-                   score_month: str,
-                   cache: dict | None = None):
-    """
-    构造训练集 (X, y)：更早月份「训练行为月 → 训练结果月」的全体用户样本。
-    cache：可选 dict（month → 特征表 / '_by_month' → 按月分片），跨次调用复用。
-    """
-    by_month = _month_slices(panel, cache)
-    # 按月名排序（'YYYY-MM' 字典序即时间顺序）
-    months = sorted(by_month)
-    # X_parts / y_parts：各月片段，最后纵向拼接
-    X_parts = []
-    y_parts = []
+    tables = {}
     for m in months:
-        # 训练行为月的下一个自然月 = 训练结果月（提供"次月是否购买"标签）
-        nm = _next_month(m)
-        # 时间窗口：训练结果月不得晚于本轮（否则泄漏）
-        if nm > score_month:
-            break
-        ev_m = by_month.get(m)
-        ev_nm = by_month.get(nm)
-
-        # 任一月份缺数据 → 该月份对无法构成训练样本，跳过
-        if ev_m is None or ev_nm is None or ev_m.empty or ev_nm.empty:
+        # 该月事件（面板本身带 month 列，按列过滤取一个月）
+        events = panel[panel['month'] == m]
+        # 防御：面板里没有这个月 → 跳过（下游各自判断"缺月"）
+        if events.empty:
+            print(f'  {m}: 面板里没有事件，跳过')
             continue
 
-        # 该月用户特征（带缓存：整轮打分只构建一次）
-        feats = _month_features(ev_m, m, cache)
-        # 训练标签：该月用户在训练结果月是否购买（原始事件口径）
-        buyers_nm = set(ev_nm.loc[ev_nm['event_type'].eq('purchase'), 'user_id'])
-        is_buyer = feats['user_id'].isin(buyers_nm)
-        y = is_buyer.astype(int).to_numpy()
-        # 训练样本 = 该月全体用户（不按人群拆分：统一一套特征、一个模型）
-        X_parts.append(_lr_features(feats))
-        y_parts.append(y)
+        # 缓存文件路径：cache_dir 为 None 时不落盘
+        path = None
+        if cache_dir is not None:
+            path = Path(cache_dir) / f'month_{m}.parquet'
+            # 有缓存就直接读，跳过特征构建与分层
+            if path.exists():
+                tables[m] = pd.read_parquet(path)
+                print(f'  {m}: 月度表（缓存）')
+                continue
 
-    # 防御：没有更早的月份可用（10 月是最早的建模月）
-    if not X_parts:
-        raise ValueError(
-            f'{score_month} 无法给出概率分：没有更早月份的训练数据。'
-            '（10 月是最早的建模月，没有更早的"训练行为月 → 训练结果月"样本对可用；'
-            '因此最早从 11 月开始打分）')
-    # 纵向拼接：特征行数总和 = 标签长度
-    X_train = np.vstack(X_parts)
-    y_train = np.concatenate(y_parts)
-    return X_train, y_train
+        # 该月用户特征（与全项目同一套口径，单一事实来源）
+        feats = build_features(events, events['event_time'].max())
+        # 叠加该月"当月独立分层"标签（第二个返回值是阈值，这里不需要）
+        table, _ = build_user_segment(feats)
+        if path is not None:
+            # 首次运行：落盘，下次直接读（目录不存在就创建）
+            path.parent.mkdir(parents=True, exist_ok=True)
+            table.to_parquet(path)
+            print(f'  {m}: 月度表（新建，已落盘）')
+        else:
+            print(f'  {m}: 月度表（新建）')
+        tables[m] = table
+    return tables
 
 
-def LR_predict_rank(panel: pd.DataFrame,
+def LR_predict_rank(month_tables: dict,
                     score_month: str,
-                    target_user_ids,
-                    cache: dict | None = None) -> pd.DataFrame:
+                    target_user_ids) -> pd.DataFrame:
     """纯工具：预测指定用户在『预测月』的购买概率，并在这些用户内部按概率排名。
 
     输入
     ----
-    panel           : 事件级面板（提供更早月份的训练原料）
+    month_tables    : {月份: 该月表}（见 build_month_tables：表里同时有特征与标签）
     score_month     : 训练结果月（本轮）
     target_user_ids : 要预测的用户名单（由调用方决定；函数不筛选、不判断人群、不扩大范围）
-    cache           : 可选 dict，缓存按月分片（'_by_month'）、各月特征表（month）、
-                      各月分层（'_segments'）、标准化器（'_scalers'）
 
     行为
     ----
@@ -912,35 +835,67 @@ def LR_predict_rank(panel: pd.DataFrame,
     if len(target_ids) == 0:
         raise ValueError('target_user_ids 为空，无法打分。')
 
-    # ── 1. 训练（时间窗口由 _LR_data_split 保证无泄漏；特征走缓存）──
-    X_train, y_train = _LR_data_split(panel, score_month, cache=cache)
-    # LR 模型 = 先 Z 标准化再逻辑回归（统一特征尺度，利于收敛与系数可读）
+    # ── 1. 构造训练集：更早月份的「训练行为月 → 训练结果月」全体用户样本 ──
+    # X_parts / y_parts：各月份对片段，最后纵向拼接
+    X_parts = []
+    y_parts = []
+    for m in sorted(month_tables):
+        # 训练行为月的下一个自然月 = 训练结果月（提供"次月是否购买"标签）
+        nm = _next_month(m)
+        # 防泄漏护栏：训练结果月不得晚于本轮（否则等于用本轮结果训练）
+        if nm > score_month:
+            break
+        # 该月份对缺表 → 无法构成训练样本，跳过
+        if nm not in month_tables:
+            continue
+        table_m = month_tables[m]
+        table_nm = month_tables[nm]
+        if table_m.empty or table_nm.empty:
+            continue
+        # 训练标签：该月用户在训练结果月是否购买
+        # （买过 ⇔ 该月表 Purchase_Frequency > 0，与事件表口径等价）
+        buyers_nm = set(table_nm.loc[table_nm['Purchase_Frequency'] > 0, 'user_id'])
+        is_buyer = table_m['user_id'].isin(buyers_nm)
+        y_parts.append(is_buyer.astype(int).to_numpy())
+        # 训练样本 = 该月全体用户（不按人群拆分：统一一套特征、一个模型）
+        X_parts.append(_lr_features_matrix(table_m))
+
+    # 防御：没有更早的月份可用（10 月是最早的建模月）
+    if not X_parts:
+        raise ValueError(
+            f'{score_month} 无法给出概率分：没有更早月份的训练数据。'
+            '（10 月是最早的建模月，没有更早的"训练行为月 → 训练结果月"样本对可用；'
+            '因此最早从 11 月开始打分）')
+    # 纵向拼接：特征行数总和 = 标签长度
+    X_train = np.vstack(X_parts)
+    y_train = np.concatenate(y_parts)
+
+    # ── 2. 训练：先 Z 标准化再逻辑回归（统一特征尺度，利于收敛与系数可读）──
     scaler = StandardScaler()
     logistic = LogisticRegression(max_iter=LR_MAX_ITER, random_state=RANDOM_STATE)
     pipe = make_pipeline(scaler, logistic)
     pipe.fit(X_train, y_train)
 
-    # ── 2. 取训练结果月的用户级特征表（带按月分片与特征缓存）──
-    by_month = _month_slices(panel, cache)
-    ev_sc = by_month.get(score_month)
-    # 防御：该月没有事件数据
-    if ev_sc is None or ev_sc.empty:
-        raise ValueError(f'{score_month} 没有事件数据，无法打分。')
-    feats_sc = _month_features(ev_sc, score_month, cache)
+    # ── 3. 取训练结果月的月度表 ──
+    if score_month not in month_tables:
+        raise ValueError(f'{score_month} 没有月度表，无法打分。')
+    feats_sc = month_tables[score_month]
+    # 防御：该月没有数据
+    if feats_sc.empty:
+        raise ValueError(f'{score_month} 没有数据，无法打分。')
 
-    # ── 3. 只保留目标用户；有用户不在该月 → 直接报错，避免静默少打分 ──
+    # ── 4. 只保留目标用户；有用户不在该月 → 直接报错，避免静默少打分 ──
     target_set = set(target_ids)
     is_target = feats_sc['user_id'].isin(target_set)
     sub = feats_sc.loc[is_target]
     missing = len(target_set) - len(sub)
     if missing > 0:
-        raise ValueError(f'{missing} 个目标用户在 {score_month} 的特征表里不存在，无法打分。')
+        raise ValueError(f'{missing} 个目标用户在 {score_month} 的月度表里不存在，无法打分。')
 
-    # ── 4. 打分：只对目标用户输出概率 ──
-    proba_full = pipe.predict_proba(_lr_features(sub))
-    proba = proba_full[:, 1]
+    # ── 5. 打分：只对目标用户输出概率 ──
+    proba = pipe.predict_proba(_lr_features_matrix(sub))[:, 1]
 
-    # ── 5. 组内排名：名次只在这些目标用户内部计算（1 ~ N）──
+    # ── 6. 组内排名：名次只在这些目标用户内部计算（1 ~ N）──
     out = pd.DataFrame({'user_id': sub['user_id'].to_numpy(), 'Prob': proba})
     out['Rank'] = out['Prob'].rank(ascending=False, method='min')
     return out.sort_values('Rank').reset_index(drop=True)
@@ -997,23 +952,20 @@ def load_panel(path: Path | str = PANEL_FILE,
     return panel
 
 
-def rolling_validation(df: pd.DataFrame,
-                       months: list | None = None,
-                       cache: dict | None = None) -> dict:
+def rolling_validation(month_tables: dict,
+                       months: list | None = None) -> dict:
     """
     滚动时间外验证（已购人群为跨月沉默定义）。
 
-    - 实验一（未购人群）：基期月 t 特征分层 → 观察月 t+1 购买（2 月对）；
+    - 实验一（未购人群）：基期月 t 分层 → 观察月 t+1 购买（2 月对）；
     - 实验二（已购人群）：基期月 t 高价值买家 → 观察月 t+1 完全沉默（高价值高摩擦）
        → 验证月 t+2 是否购买（3 月组，避免“沉默月 = 验证月”的循环定义）；
     返回 {'验证表': DataFrame}。
     注：LR 基准评估已移出本函数（需要时单独调用 nonbuyer_baseline / buyer_baseline）。
-    cache：可选 dict，复用各月特征（month）与各月分层（'_segments'），避免重复构建。
+    month_tables：{月份: 该月表}（见 build_month_tables）。
     """
     if months is None:
         months = MONTHS
-    # 一次性按月分片（面板 2000 万+ 行，避免后续每对月份都全表扫描；带缓存）
-    by_month = _month_slices(df, cache)
 
     # 收集每个月份对 / 月组的购买率对比结果，最终组成“验证表”
     rate_rows = []
@@ -1021,22 +973,22 @@ def rolling_validation(df: pd.DataFrame,
     for t in range(len(months) - 1):
         base_m = months[t]
         obs_m = months[t + 1]
-        base_events = by_month.get(base_m)
-        obs_events = by_month.get(obs_m)
-        # 该月对任一方向缺数据 → 跳过（不构成可用实验窗口）
-        if base_events is None or obs_events is None or base_events.empty or obs_events.empty:
+        base_table = month_tables.get(base_m)
+        obs_table = month_tables.get(obs_m)
+        # 该月对任一方向缺表 → 跳过（不构成可用实验窗口）
+        if base_table is None or obs_table is None or base_table.empty or obs_table.empty:
             print(f'跳过 {base_m}→{obs_m}（无数据）')
             continue
-        # 基期月特征 + 当月独立分层（都走缓存：整轮验证只算一次）
-        features = _month_features(base_events, base_m, cache)
-        segmented = _month_segments(features, base_m, cache)
 
         # ── 实验一（未购人群）：基期特征 → 观察月购买 ──
-        # 规则人群 = 高潜力首购用户；对照组 = 普通浏览用户
-        potential = set(segmented.loc[segmented['User_Segment'] == '高潜力首购用户', 'user_id'])
-        nonbuyer_control = set(segmented.loc[segmented['User_Segment'] == '普通浏览用户', 'user_id'])
+        # 规则人群 = 高潜力首购用户；对照组 = 普通浏览用户（基期表里已带标签）
+        potential = set(base_table.loc[base_table['User_Segment'] == '高潜力首购用户', 'user_id'])
+        nonbuyer_control = set(base_table.loc[base_table['User_Segment'] == '普通浏览用户', 'user_id'])
+        # 观察月买过的人（买过 ⇔ 该月表 Purchase_Frequency > 0）
+        obs_buyers = set(obs_table.loc[obs_table['Purchase_Frequency'] > 0, 'user_id'])
         # 两组在观察月的购买率对比 + 显著性检验
-        res1 = rolling_validation_rate_test(obs_events, potential, nonbuyer_control, f'{base_m}→{obs_m} 高潜力首购')
+        res1 = rolling_validation_rate_test(obs_buyers, potential, nonbuyer_control,
+                                            f'{base_m}→{obs_m} 高潜力首购')
         row1 = {'训练月': base_m, '沉默月': '', '验证月': obs_m, '实验': '高潜力首购'}
         # 把 rolling_validation_rate_test 返回的各列指标并入这一行
         row1.update(res1)
@@ -1045,19 +997,22 @@ def rolling_validation(df: pd.DataFrame,
         # ── 实验二（已购人群·跨月沉默）：基期高价值 → 观察月沉默 → 验证月购买（需第 3 个月）──
         if t + 2 < len(months):
             out_m = months[t + 2]
-            out_events = by_month.get(out_m)
-            # 验证月缺数据 → 该三周窗口不成立
-            if out_events is None or out_events.empty:
+            out_table = month_tables.get(out_m)
+            # 验证月缺表 → 该三周窗口不成立
+            if out_table is None or out_table.empty:
                 print(f'跳过 {base_m}→{obs_m}→{out_m}（验证月无数据）')
                 continue
-            # 用观察月事件标记"跨月完全沉默"的高价值用户（= 高价值高摩擦）
-            flagged = silent_buyer(segmented, obs_events)
+            # 用观察月的活跃用户标记"跨月完全沉默"的高价值用户（= 高价值高摩擦）
+            obs_active = set(obs_table['user_id'])
+            flagged = silent_buyer(base_table, obs_active)
             # 沉默组：高价值高摩擦用户；对照组：观察月仍活跃的高价值用户
             silent_vip = set(flagged.loc[flagged['User_Segment'] == '高价值高摩擦用户', 'user_id'])
             active_vip_mask = flagged['User_Segment'].isin(['高价值直购用户', '高价值深度互动用户'])
             active_vip = set(flagged.loc[active_vip_mask, 'user_id'])
+            # 验证月买过的人
+            out_buyers = set(out_table.loc[out_table['Purchase_Frequency'] > 0, 'user_id'])
             # 两组在验证月（t+2）的购买率对比（避免"沉默月 = 验证月"的循环定义）
-            res2 = rolling_validation_rate_test(out_events, silent_vip, active_vip,
+            res2 = rolling_validation_rate_test(out_buyers, silent_vip, active_vip,
                              f'{base_m}(基期)→{obs_m}(沉默)→{out_m}(验证) 高价值高摩擦')
             row2 = {'训练月': base_m, '沉默月': obs_m, '验证月': out_m,
                     '实验': '高价值高摩擦(沉默)'}
@@ -1070,8 +1025,8 @@ def rolling_validation(df: pd.DataFrame,
     return {'验证表': validation_table}
 
 
-def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None = None,
-                     cache: dict | None = None) -> pd.DataFrame:
+def cohort_migration(panel: pd.DataFrame, base_month: str,
+                     months: list | None = None) -> pd.DataFrame:
     """
     队列迁移分析（标签视角）：固定基期月分层 → 用**冻结的基期阈值**逐月重算
     同一批用户的标签，回答“10 月标签在后续月份是保持还是转化”。
@@ -1081,13 +1036,16 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
 
     返回 DataFrame：基期标签 × 月份 × 冻结标签占比（行内归一）。
     '无任何活动' = 当月完全无任何事件的用户。
-    cache：可选 dict——基期月复用 cache[base_month]（含 '_scalers'），
-    后续月用冻结尺子算出的特征缓存在 cache['_frozen'][month]（与当月独立分层结果无关）。
+
+    注：本函数要用冻结尺子**重算特征**，必须有原始事件，因此直接收面板，
+    不使用"月度表"（月度表是用户级聚合结果，无法还原事件）。
     """
     if months is None:
         months = MONTHS
-    # 一次性按月分片（避免逐月全表扫描；带缓存）
-    by_month = _month_slices(panel, cache)
+    # 面板按月切片（只切一次，避免逐月全表扫描）
+    by_month = {}
+    for m, g in panel.groupby('month'):
+        by_month[m] = g
     base_events = by_month.get(base_month)
     # 防御：基期月必须存在且非空
     if base_events is None or base_events.empty:
@@ -1096,12 +1054,10 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
     # ── 基期：拟合阈值 + 拟合 Exploration 标准化器 ──
     # 标准化器"冻结"给后续月复用——否则每月重新标准化会让 Exploration 的"尺子"
     # 每月漂移、破坏跨月可比（那就只冻结了阈值数值、没冻结尺子本身）
-    feats_base, scalers = _month_features(base_events, base_month, cache, return_scalers=True)
-    # 基期分层：得到基期标签与本次拟合的全部阈值（阈值必须本函数拟合，故不复用缓存的分层）
-    base_seg, thresholds = segment_users(feats_base)
-    if cache is not None:
-        # 把基期"当月独立分层"结果也放进缓存，供其他消费者复用
-        cache.setdefault('_segments', {})[base_month] = base_seg
+    feats_base, scalers = build_features(base_events, base_events['event_time'].max(),
+                                         return_scalers=True)
+    # 基期分层：得到基期标签与本次拟合的全部阈值
+    base_seg, thresholds = build_user_segment(feats_base)
     # 只追踪基期之后的月份
     after = []
     for m in months:
@@ -1118,20 +1074,15 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
         if ev is None or ev.empty:
             continue
         # 下推过滤：只保留基期用户，后续各月特征聚合计算量大幅减少。
-        # Exploration 用冻结标准化器、阈值冻结，过滤不改变任何标签判定（语义等价）。
+        # 注意：过滤后 observation_end 取的是**子集**的最大事件时间，与"整月口径"算出的
+        # Recency_Days 存在细微差异（既有行为，保持原样以免改动历史结论）。
         ev = ev[ev['user_id'].isin(base_user_ids)]
         if ev.empty:
             continue
-        # 当月特征（用基期标准化器 transform，不重拟合）；带缓存：'_frozen'[month]
-        frozen_cache = cache.setdefault('_frozen', {}) if cache is not None else None
-        if frozen_cache is not None and m in frozen_cache:
-            feats_m = frozen_cache[m]
-        else:
-            feats_m = build_features(ev, ev['event_time'].max(), scalers=scalers)
-            if frozen_cache is not None:
-                frozen_cache[m] = feats_m
+        # 当月特征（用基期标准化器 transform，不重拟合）
+        feats_m = build_features(ev, ev['event_time'].max(), scalers=scalers)
         # 当月标签（用冻结的基期阈值重算）
-        seg_m, _ = segment_users(feats_m, thresholds=thresholds)
+        seg_m, _ = build_user_segment(feats_m, thresholds=thresholds)
         # user_id → 当月标签 的映射（不在当月出现 → NaN）
         lab_map = seg_m.set_index('user_id')['User_Segment']
         # 以"全部基期用户 × 该月"为骨架生成明细表

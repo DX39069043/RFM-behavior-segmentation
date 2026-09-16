@@ -433,13 +433,13 @@ df[['user_id', 'E_Score', 'Friction']].head()
 **Cell 19（代码）** —— 执行分层：
 
 ```python
-from analysis import segment_users, segment_summary
+from analysis import build_user_segment, segment_summary
 
 # 分层逻辑（analysis.py）：
 # - 高价值：仅在已购用户内部，按价值指数上四分位确定
 # - 未购用户：用行为 GMM 阈值识别高潜力首购用户
 # - 所有阈值只在 10 月建模期拟合，11 月验证期只读取标签
-final_df, thresholds = segment_users(df)
+final_df, thresholds = build_user_segment(df)
 
 print('建模期拟合阈值:', {k: round(v, 4) for k, v in thresholds.items()})
 print()

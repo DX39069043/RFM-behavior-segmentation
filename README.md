@@ -56,13 +56,13 @@
 ## 目录
 
 - `main.ipynb`：可复现分析、时间外验证和名单导出（EDA → 分层 → 滚动验证（正式）→ 汇总 → 概率分选人 → 名单 → 队列迁移分析）；
-- `analysis.py`：特征构建、GMM 阈值、分层（含冻结阈值）、跨月沉默、检验、`LR_predict_rank` 打分工具、滚动验证与队列迁移（另有可独立调用的 LR 基准评估函数）；
+- `analysis.py`：特征构建、GMM 阈值、分层（含冻结阈值）、`build_month_tables` 月度表构造、跨月沉默、检验、`LR_predict_rank` 打分工具、滚动验证与队列迁移（另有可独立调用的 LR 基准评估函数）；
 - `config.py`：集中配置（路径、月份、随机种子、会话阈值）；
 - `run_rolling.py`：滚动验证入口（需 7 个月面板，生成 1 张结果 CSV）；
 - `run_cohort.py`：队列迁移分析入口（需 7 个月面板，生成冻结标签 CSV）；
 - `sample_user_cohort.py`：按用户哈希抽样生成 7 个月面板；
 - `tests/`：单元测试（25 个用例）：`python -m unittest discover -s tests`；
 - `data/panel_7months.parquet`：7 个月用户面板（全部分析的数据源）；
-- `data/_month_cache/`：Notebook 的「月度特征与分层缓存」——7 个月的用户特征与“当月独立分层”各算一次，打分 / 滚动验证 / 排序验证章节复用；删除该目录即可强制重算（随 `data/` 一起被忽略）；
+- `data/_month_cache/`：Notebook 的「月度表缓存」——7 个月各一张月度表（该月用户特征 + 该月“当月独立分层”标签，一个月一个 `month_YYYY-MM.parquet`），打分 / 滚动验证 / 排序验证章节复用；删除该目录即可强制重算（随 `data/` 一起被忽略）；
 - `tracked_users_list_Nov.csv`：Notebook 运行后生成的候选触达名单（11 月高潜力首购 17,612 人，入库）；
 - `user_segments_all_Nov.csv`：全量分层名单（11 月活跃用户 18.5 万 × 5 类标签，体积大，不入库、可重算）。
