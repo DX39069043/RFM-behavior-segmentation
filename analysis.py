@@ -6,12 +6,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import chi2_contingency, fisher_exact
+from sklearn.linear_model import LogisticRegression
 from sklearn.mixture import GaussianMixture
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from config import (BOOTSTRAP_N, CV_FOLDS, DEDUPE_EVENTS, LR_MAX_ITER,
-                    MONTHS, PANEL_FILE, POOL_SEGMENTS, POOL_TOP_RATIO,
-                    RANDOM_STATE, SESSION_GAP_SECONDS)
+                    MONTHS, PANEL_FILE, RANDOM_STATE, SESSION_GAP_SECONDS)
 
 
 def F_and_E_scalers(df: pd.DataFrame) -> dict:
@@ -514,17 +515,6 @@ _LR_FEATURE_NAMES = ['log1p(Total_Spending)', 'log1p(Purchase_Frequency)', 'log1
                      'log1p(Cart_Products)']
 
 
-def _lr_pipeline() -> 'object':
-    """标准化的 (StandardScaler + LogisticRegression) 流水线。"""
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import make_pipeline
-    # 流水线 = 先 Z 标准化再逻辑回归：统一特征尺度，利于模型收敛与系数可读
-    scaler = StandardScaler()
-    lr = LogisticRegression(max_iter=LR_MAX_ITER, random_state=RANDOM_STATE)
-    pipeline = make_pipeline(scaler, lr)
-    return pipeline
-
-
 def nonbuyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
                       random_state: int = RANDOM_STATE) -> dict:
     """
@@ -568,8 +558,10 @@ def nonbuyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
     # ── 3. 5 折分层交叉验证：产出 OOF 预测 ──
     # 分层 K 折：保证每折正负样本比例与整体一致
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=random_state)
-    # LR 流水线（标准化 + 逻辑回归）
-    pipe = _lr_pipeline()
+    # LR 模型 = 先 Z 标准化再逻辑回归（统一特征尺度，利于收敛与系数可读）
+    scaler = StandardScaler()
+    logistic = LogisticRegression(max_iter=LR_MAX_ITER, random_state=RANDOM_STATE)
+    pipe = make_pipeline(scaler, logistic)
     # OOF：仅浏览特征预测首购概率
     p_lr_vol = cross_val_predict(pipe, x_vol, y, cv=cv, method='predict_proba')
     p_lr_vol = p_lr_vol[:, 1]
@@ -692,7 +684,10 @@ def buyer_baseline(segmented: pd.DataFrame, nov: pd.DataFrame,
 
     # ── 3. 5 折分层交叉验证：产出 OOF 预测 ──
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=random_state)
-    pipe = _lr_pipeline()
+    # LR 模型 = 先 Z 标准化再逻辑回归（统一特征尺度，利于收敛与系数可读）
+    scaler = StandardScaler()
+    logistic = LogisticRegression(max_iter=LR_MAX_ITER, random_state=RANDOM_STATE)
+    pipe = make_pipeline(scaler, logistic)
     # OOF：完整特征预测复购概率（主模型）
     p_lr = cross_val_predict(pipe, x_full, y, cv=cv, method='predict_proba')
     p_lr = p_lr[:, 1]
@@ -775,24 +770,74 @@ def _next_month(m: str) -> str:
     return f'{year:04d}-{month + 1:02d}'
 
 
-def LR_data_split(panel: pd.DataFrame,
-                  score_month: str,
-                  cache: dict | None = None):
-    """构造训练集 (X, y)：更早月份「训练行为月 → 训练结果月」的全体用户样本。
+def _month_slices(panel: pd.DataFrame,
+                  cache: dict | None) -> dict:
 
-    时间窗口是防泄漏的核心：只收训练结果月不晚于本轮（= 被打分用户所在月）的月份对，
-    因此被打分用户在预测月的结果永远不会进入训练集。
-    特征用统一的 _lr_features；标签 = 该用户在训练结果月是否购买（原始事件口径）。
-    """
-    # ── 1. 按月分片（一次性），避免对 2000 万+ 行面板反复全表布尔过滤 ──
+    """把面板按月分片成 {月名 -> 事件表}；带缓存（cache['_by_month']），避免反复全表过滤。"""
     if cache is not None and '_by_month' in cache:
-        by_month = cache['_by_month']
-    else:
-        by_month = {}
-        for m, g in panel.groupby('month'):
-            by_month[m] = g
+        return cache['_by_month']
+    by_month = {}
+    for m, g in panel.groupby('month'):
+        by_month[m] = g
+    if cache is not None:
+        cache['_by_month'] = by_month
+    return by_month
+
+
+def _month_features(events: pd.DataFrame,
+                    month: str,
+                    cache: dict | None,
+                    return_scalers: bool = False):
+    """取某月用户特征表；带缓存（cache[month]），避免每月重复 build_features（约 40 秒/月）。
+
+    return_scalers=True 时返回 (特征表, 标准化器)：标准化器缓存在 cache['_scalers']。
+    """
+    if cache is not None and month in cache:
+        feats = cache[month]
+        if not return_scalers:
+            return feats
+        scalers = cache.get('_scalers')
+        # 缓存里没有标准化器 → 用缓存的特征表补拟合一次，保证返回值完整
+        if scalers is None:
+            scalers = F_and_E_scalers(feats)
+            cache['_scalers'] = scalers
+        return feats, scalers
+    if return_scalers:
+        feats, scalers = build_features(events, events['event_time'].max(), return_scalers=True)
         if cache is not None:
-            cache['_by_month'] = by_month
+            cache[month] = feats
+            cache['_scalers'] = scalers
+        return feats, scalers
+    feats = build_features(events, events['event_time'].max())
+    if cache is not None:
+        cache[month] = feats
+    return feats
+
+
+def _month_segments(feats: pd.DataFrame, month: str, cache: dict | None) -> pd.DataFrame:
+    """取某月『当月独立分层』结果；带缓存（cache['_segments'][month]）。
+
+    注意：这里缓存的是"每月独立拟合阈值"的分层结果，供打分 / 滚动验证使用；
+    队列迁移用的是"冻结基期阈值 + 冻结标准化器"的另一套结果，两者不可混用。
+    """
+    if cache is None:
+        return segment_users(feats)[0]
+    segs = cache.setdefault('_segments', {})
+    if month in segs:
+        return segs[month]
+    seg = segment_users(feats)[0]
+    segs[month] = seg
+    return seg
+
+
+def _LR_data_split(panel: pd.DataFrame,
+                   score_month: str,
+                   cache: dict | None = None):
+    """
+    构造训练集 (X, y)：更早月份「训练行为月 → 训练结果月」的全体用户样本。
+    cache：可选 dict（month → 特征表 / '_by_month' → 按月分片），跨次调用复用。
+    """
+    by_month = _month_slices(panel, cache)
     # 按月名排序（'YYYY-MM' 字典序即时间顺序）
     months = sorted(by_month)
     # X_parts / y_parts：各月片段，最后纵向拼接
@@ -801,21 +846,18 @@ def LR_data_split(panel: pd.DataFrame,
     for m in months:
         # 训练行为月的下一个自然月 = 训练结果月（提供"次月是否购买"标签）
         nm = _next_month(m)
-        # 时间窗口：训练结果月不得晚于本轮训练结果月（否则泄漏）
+        # 时间窗口：训练结果月不得晚于本轮（否则泄漏）
         if nm > score_month:
             break
         ev_m = by_month.get(m)
         ev_nm = by_month.get(nm)
+
         # 任一月份缺数据 → 该月份对无法构成训练样本，跳过
         if ev_m is None or ev_nm is None or ev_m.empty or ev_nm.empty:
             continue
-        if cache is not None and m in cache:
-            feats = cache[m]
-        else:
-            # 用该月事件构建用户特征（观察期终点 = 当月最后一条事件时间）
-            feats = build_features(ev_m, ev_m['event_time'].max())
-            if cache is not None:
-                cache[m] = feats
+
+        # 该月用户特征（带缓存：整轮打分只构建一次）
+        feats = _month_features(ev_m, m, cache)
         # 训练标签：该月用户在训练结果月是否购买（原始事件口径）
         buyers_nm = set(ev_nm.loc[ev_nm['event_type'].eq('purchase'), 'user_id'])
         is_buyer = feats['user_id'].isin(buyers_nm)
@@ -823,6 +865,7 @@ def LR_data_split(panel: pd.DataFrame,
         # 训练样本 = 该月全体用户（不按人群拆分：统一一套特征、一个模型）
         X_parts.append(_lr_features(feats))
         y_parts.append(y)
+
     # 防御：没有更早的月份可用（10 月是最早的建模月）
     if not X_parts:
         raise ValueError(
@@ -844,9 +887,10 @@ def LR_predict_rank(panel: pd.DataFrame,
     输入
     ----
     panel           : 事件级面板（提供更早月份的训练原料）
-    score_month     : 被打分用户所在的月份（= 本轮训练结果月）
+    score_month     : 训练结果月（本轮）
     target_user_ids : 要预测的用户名单（由调用方决定；函数不筛选、不判断人群、不扩大范围）
-    cache           : 可选 dict（month → 特征表 / '_by_month' → 按月分片），跨次调用复用
+    cache           : 可选 dict，缓存按月分片（'_by_month'）、各月特征表（month）、
+                      各月分层（'_segments'）、标准化器（'_scalers'）
 
     行为
     ----
@@ -857,35 +901,32 @@ def LR_predict_rank(panel: pd.DataFrame,
 
     返回：DataFrame[user_id, Prob, Rank]，按 Rank 升序。
     """
-    # 目标用户去重（重复传入不影响结果）
-    target_ids = list(dict.fromkeys(target_user_ids))
+    # 目标用户去重
+    seen = set()
+    target_ids = []
+    for uid in target_user_ids:
+        if uid not in seen:
+            seen.add(uid)
+            target_ids.append(uid)
+
     if len(target_ids) == 0:
         raise ValueError('target_user_ids 为空，无法打分。')
 
-    # ── 1. 训练（时间窗口由 LR_data_split 保证无泄漏）──
-    X_train, y_train = LR_data_split(panel, score_month, cache=cache)
-    pipe = _lr_pipeline()
+    # ── 1. 训练（时间窗口由 _LR_data_split 保证无泄漏；特征走缓存）──
+    X_train, y_train = _LR_data_split(panel, score_month, cache=cache)
+    # LR 模型 = 先 Z 标准化再逻辑回归（统一特征尺度，利于收敛与系数可读）
+    scaler = StandardScaler()
+    logistic = LogisticRegression(max_iter=LR_MAX_ITER, random_state=RANDOM_STATE)
+    pipe = make_pipeline(scaler, logistic)
     pipe.fit(X_train, y_train)
 
-    # ── 2. 取打分月的用户级特征表（带按月分片与特征缓存）──
-    if cache is not None and '_by_month' in cache:
-        by_month = cache['_by_month']
-    else:
-        by_month = {}
-        for m, g in panel.groupby('month'):
-            by_month[m] = g
-        if cache is not None:
-            cache['_by_month'] = by_month
-    if cache is not None and score_month in cache:
-        feats_sc = cache[score_month]
-    else:
-        ev_sc = by_month.get(score_month)
-        # 防御：该月没有事件数据
-        if ev_sc is None or ev_sc.empty:
-            raise ValueError(f'{score_month} 没有事件数据，无法打分。')
-        feats_sc = build_features(ev_sc, ev_sc['event_time'].max())
-        if cache is not None:
-            cache[score_month] = feats_sc
+    # ── 2. 取训练结果月的用户级特征表（带按月分片与特征缓存）──
+    by_month = _month_slices(panel, cache)
+    ev_sc = by_month.get(score_month)
+    # 防御：该月没有事件数据
+    if ev_sc is None or ev_sc.empty:
+        raise ValueError(f'{score_month} 没有事件数据，无法打分。')
+    feats_sc = _month_features(ev_sc, score_month, cache)
 
     # ── 3. 只保留目标用户；有用户不在该月 → 直接报错，避免静默少打分 ──
     target_set = set(target_ids)
@@ -957,7 +998,8 @@ def load_panel(path: Path | str = PANEL_FILE,
 
 
 def rolling_validation(df: pd.DataFrame,
-                       months: list | None = None) -> dict:
+                       months: list | None = None,
+                       cache: dict | None = None) -> dict:
     """
     滚动时间外验证（已购人群为跨月沉默定义）。
 
@@ -966,16 +1008,12 @@ def rolling_validation(df: pd.DataFrame,
        → 验证月 t+2 是否购买（3 月组，避免“沉默月 = 验证月”的循环定义）；
     返回 {'验证表': DataFrame}。
     注：LR 基准评估已移出本函数（需要时单独调用 nonbuyer_baseline / buyer_baseline）。
+    cache：可选 dict，复用各月特征（month）与各月分层（'_segments'），避免重复构建。
     """
     if months is None:
         months = MONTHS
-    # 一次性按月分片（面板 2000 万+ 行，避免后续每对月份都全表扫描）
-
-    by_month = {}
-    for m, g in df.groupby('month'):
-        by_month[m] = g
-        # m：这一组的分组键，也就是 month 列的一个唯一值，比如 '2019-10'、'2019-11'；
-        # g：这一组对应的子 DataFrame，包含原 df 中所有 month == m 的行。
+    # 一次性按月分片（面板 2000 万+ 行，避免后续每对月份都全表扫描；带缓存）
+    by_month = _month_slices(df, cache)
 
     # 收集每个月份对 / 月组的购买率对比结果，最终组成“验证表”
     rate_rows = []
@@ -989,9 +1027,9 @@ def rolling_validation(df: pd.DataFrame,
         if base_events is None or obs_events is None or base_events.empty or obs_events.empty:
             print(f'跳过 {base_m}→{obs_m}（无数据）')
             continue
-        # 基期月构建特征 + 当月分层
-        features = build_features(base_events, base_events['event_time'].max())
-        segmented, _ = segment_users(features)
+        # 基期月特征 + 当月独立分层（都走缓存：整轮验证只算一次）
+        features = _month_features(base_events, base_m, cache)
+        segmented = _month_segments(features, base_m, cache)
 
         # ── 实验一（未购人群）：基期特征 → 观察月购买 ──
         # 规则人群 = 高潜力首购用户；对照组 = 普通浏览用户
@@ -1032,7 +1070,8 @@ def rolling_validation(df: pd.DataFrame,
     return {'验证表': validation_table}
 
 
-def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None = None) -> pd.DataFrame:
+def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None = None,
+                     cache: dict | None = None) -> pd.DataFrame:
     """
     队列迁移分析（标签视角）：固定基期月分层 → 用**冻结的基期阈值**逐月重算
     同一批用户的标签，回答“10 月标签在后续月份是保持还是转化”。
@@ -1042,13 +1081,13 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
 
     返回 DataFrame：基期标签 × 月份 × 冻结标签占比（行内归一）。
     '无任何活动' = 当月完全无任何事件的用户。
+    cache：可选 dict——基期月复用 cache[base_month]（含 '_scalers'），
+    后续月用冻结尺子算出的特征缓存在 cache['_frozen'][month]（与当月独立分层结果无关）。
     """
     if months is None:
         months = MONTHS
-    # 一次性按月分片（避免逐月全表扫描），后续都从这个字典取数
-    by_month = {}
-    for m, g in panel.groupby('month'):
-        by_month[m] = g
+    # 一次性按月分片（避免逐月全表扫描；带缓存）
+    by_month = _month_slices(panel, cache)
     base_events = by_month.get(base_month)
     # 防御：基期月必须存在且非空
     if base_events is None or base_events.empty:
@@ -1057,10 +1096,12 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
     # ── 基期：拟合阈值 + 拟合 Exploration 标准化器 ──
     # 标准化器"冻结"给后续月复用——否则每月重新标准化会让 Exploration 的"尺子"
     # 每月漂移、破坏跨月可比（那就只冻结了阈值数值、没冻结尺子本身）
-    feats_base, scalers = build_features(base_events, base_events['event_time'].max(),
-                                         return_scalers=True)
-    # 基期分层：得到基期标签与本次拟合的全部阈值
+    feats_base, scalers = _month_features(base_events, base_month, cache, return_scalers=True)
+    # 基期分层：得到基期标签与本次拟合的全部阈值（阈值必须本函数拟合，故不复用缓存的分层）
     base_seg, thresholds = segment_users(feats_base)
+    if cache is not None:
+        # 把基期"当月独立分层"结果也放进缓存，供其他消费者复用
+        cache.setdefault('_segments', {})[base_month] = base_seg
     # 只追踪基期之后的月份
     after = []
     for m in months:
@@ -1081,8 +1122,14 @@ def cohort_migration(panel: pd.DataFrame, base_month: str, months: list | None =
         ev = ev[ev['user_id'].isin(base_user_ids)]
         if ev.empty:
             continue
-        # 当月特征（用基期标准化器 transform，不重拟合）
-        feats_m = build_features(ev, ev['event_time'].max(), scalers=scalers)
+        # 当月特征（用基期标准化器 transform，不重拟合）；带缓存：'_frozen'[month]
+        frozen_cache = cache.setdefault('_frozen', {}) if cache is not None else None
+        if frozen_cache is not None and m in frozen_cache:
+            feats_m = frozen_cache[m]
+        else:
+            feats_m = build_features(ev, ev['event_time'].max(), scalers=scalers)
+            if frozen_cache is not None:
+                frozen_cache[m] = feats_m
         # 当月标签（用冻结的基期阈值重算）
         seg_m, _ = segment_users(feats_m, thresholds=thresholds)
         # user_id → 当月标签 的映射（不在当月出现 → NaN）
