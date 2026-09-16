@@ -352,11 +352,6 @@ def silent_buyer(segmented: pd.DataFrame, active_user_ids) -> pd.DataFrame:
     """
     已购人群“跨月沉默”高摩擦标记（流失判定）。
 
-    基期的高价值用户（高价值直购 / 深度互动）在观察月完全无任何事件
-    （view / cart / purchase 都没有）→ 标记为“高价值高摩擦用户”（= 沉默/流失）。
-    未购用户与其他人群不受影响。
-
-    active_user_ids：观察月里出现过（有任何事件）的 user_id 集合。
     """
     # 在副本上操作，避免影响调用方
     out = segmented.copy()
@@ -365,7 +360,8 @@ def silent_buyer(segmented: pd.DataFrame, active_user_ids) -> pd.DataFrame:
     # 防御：观察月一个人都没出现时，无法判断"谁没出现"
     if len(active) == 0:
         raise ValueError('观察月没有活跃用户，无法判定沉默。')
-    # 只看基期的高价值人群：高价值直购 / 高价值深度互动
+
+    # 找出高价值用户
     vip_mask = out['User_Segment'].isin(['高价值直购用户', '高价值深度互动用户'])
     # 高价值用户若在观察月完全没有事件 → 标记为"高价值高摩擦用户"（沉默/流失）
     silence_mask = vip_mask & ~out['user_id'].isin(active)
