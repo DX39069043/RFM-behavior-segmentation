@@ -87,7 +87,7 @@ data/
 - Logistic Regression 名单内优先级排序
 - 关键结果汇总文件
 
-因此，仓库可以用于查看**完整分析方法、代码实现与核心结果**；若需要完整复现，则需要在本地补充对应的原始行为数据，并按照项目配置运行分析流程。
+因此，仓库可以用于查看**完整分析方法、代码实现与核心结果**；若需要完整复现，则需要在本地补充对应的原始行为数据，并按照项目配置运行分析流程。本项目使用的原始数据集来自 Kaggle，可从 https://www.kaggle.com/datasets/mkechinov/ecommerce-behavior-data-from-multi-category-store 下载。
 
 ### 2.4 核心特征
 
