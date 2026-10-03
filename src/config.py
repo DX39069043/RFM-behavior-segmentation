@@ -1,6 +1,6 @@
 """项目集中配置：路径、月份、随机种子、会话阈值等。
 
-src/analysis.py、src/run_*.py 与 notebooks/main.ipynb 共用，避免魔法数字散落。
+src/analysis.py、src/run_*.py 与 main.ipynb 共用，避免魔法数字散落。
 """
 from pathlib import Path
 

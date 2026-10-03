@@ -502,23 +502,26 @@ A/B Test
 ```text
 ecommerce-user-behavior-segmentation/
 │
-├── analysis.py
-├── config.py
-├── run_cohort.py
-├── run_rolling.py
-├── sample_user_cohort.py
+├── src/
+│   ├── __init__.py
+│   ├── analysis.py             # 核心：特征工程、用户分层、滚动验证、LR 排序
+│   ├── config.py               # 数据路径、分析月份及主要参数配置
+│   ├── run_rolling.py          # 执行滚动时间外验证（python -m src.run_rolling）
+│   ├── run_cohort.py           # 执行固定基期队列迁移分析（python -m src.run_cohort）
+│   └── sample_user_cohort.py   # 数据及用户队列相关处理
 │
-├── main.ipynb
-├── main.md
-├── 数据分析报告.md
+├── main.ipynb                  # 主要分析流程及结果展示
 │
-├── cohort_frozen_labels.csv
-├── rolling_validation_results.csv
-├── rolling_baseline_results.csv
-├── tracked_users_list_Nov.csv
+├── results/                    # 运行产物（小体积结果入库）
+│   ├── rolling_validation_results.csv
+│   ├── cohort_frozen_labels.csv
+│   └── tracked_users_list_Nov.csv
 │
 ├── tests/
-│   └── test_analysis.py
+│   └── test_analysis.py        # 核心分析函数与边界逻辑测试（24 个用例）
+│
+├── docs/
+│   └── 数据分析报告.md          # 完整分析过程、结果与业务解读
 │
 ├── README.md
 ├── requirements.txt
@@ -529,18 +532,19 @@ ecommerce-user-behavior-segmentation/
 
 ### 核心文件
 
-| 文件                             | 作用                                       |
-| -------------------------------- | ------------------------------------------ |
-| `analysis.py`                    | 核心特征工程、用户分层、验证及 LR 排序函数 |
-| `config.py`                      | 数据路径、分析月份及主要参数配置           |
-| `run_rolling.py`                 | 执行滚动时间外验证                         |
-| `run_cohort.py`                  | 执行固定基期队列迁移分析                   |
-| `sample_user_cohort.py`          | 数据及用户队列相关处理                     |
-| `main.ipynb`                     | 主要分析流程及结果展示                     |
-| `数据分析报告.md`                | 完整分析过程、结果与业务解读               |
-| `tests/test_analysis.py`         | 核心分析函数与边界逻辑测试                 |
-| `rolling_validation_results.csv` | 滚动验证结果                               |
-| `rolling_baseline_results.csv`   | 基准及排序相关结果                         |
+| 文件                                     | 作用                                       |
+| ---------------------------------------- | ------------------------------------------ |
+| `src/analysis.py`                        | 核心特征工程、用户分层、验证及 LR 排序函数 |
+| `src/config.py`                          | 数据路径、分析月份及主要参数配置           |
+| `src/run_rolling.py`                     | 执行滚动时间外验证                         |
+| `src/run_cohort.py`                      | 执行固定基期队列迁移分析                   |
+| `src/sample_user_cohort.py`              | 数据及用户队列相关处理                     |
+| `main.ipynb`                             | 主要分析流程及结果展示                     |
+| `docs/数据分析报告.md`                   | 完整分析过程、结果与业务解读               |
+| `tests/test_analysis.py`                 | 核心分析函数与边界逻辑测试                 |
+| `results/rolling_validation_results.csv` | 滚动验证结果                               |
+| `results/cohort_frozen_labels.csv`       | 队列迁移（冻结阈值）结果                   |
+| `results/tracked_users_list_Nov.csv`     | 候选触达名单                               |
 
 ---
 
