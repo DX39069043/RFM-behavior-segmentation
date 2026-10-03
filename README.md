@@ -41,28 +41,72 @@
 
 1. **实验一（未购人群）**：高潜力首购用户 vs 普通浏览用户的次月购买率。2019-10→11 组：5,408 vs 12.85 万用户，购买率 **13.30% vs 5.41%**（购买率差〔目标组 − 对照组购买率〕+7.88pp，卡方检验 p=2.2e-131）；6/6 个月对显著，购买率差 +4.5~+9.3pp 跨月稳定；
 2. **实验二（已购人群·跨月沉默）**：基期高价值买家在观察月完全沉默后，其验证月购买率与活跃高价值对照组的比较（3 月组滚动验证，避免“沉默月 = 验证月”循环）；5/5 个月组极显著，购买率差 −19.9~−31.8pp（p<1e-68）；
-3. 导出运营名单：**全量分层名单**（`user_segments_all_Nov.csv`，11 月活跃用户 18.5 万 × 5 类标签，运营按 `User_Segment` 筛选差异化策略）与**候选触达名单**（`tracked_users_list_Nov.csv`，11 月高潜力首购用户 17,612 人，名单内按概率分排名、`TopK_Flag=1` 的 8,806 人优先触达）。**注意 LR 的时间窗口**：规则只用当月行为打标签（2 个月）；打分由纯工具函数 `LR_predict_rank` 完成——它用更早月份的「训练行为月 → 训练结果月」样本训练（一个 LR、原始字段特征），再对**调用方传入的用户名单**预测预测月的购买概率并给出名次（名次在传入名单内部计算；3 个月窗口，训练数据不含本轮的结果）。**10 月是最早的建模月、没有更早的训练行为月，无法给出概率分也不需要选人**，打分最早从 11 月开始。真正的营销增量需通过随机 A/B 实验确认。
+3. 导出运营名单：**候选触达名单**（`results/tracked_users_list_Nov.csv`，11 月高潜力首购用户 17,612 人，名单内按概率分排名、`TopK_Flag=1` 的 8,806 人优先触达）。**注意 LR 的时间窗口**：规则只用当月行为打标签（2 个月）；打分由纯工具函数 `LR_predict_rank` 完成——它用更早月份的「训练行为月 → 训练结果月」样本训练（一个 LR、原始字段特征），再对**调用方传入的用户名单**预测预测月的购买概率并给出名次（名次在传入名单内部计算；3 个月窗口，训练数据不含本轮的结果）。**10 月是最早的建模月、没有更早的训练行为月，无法给出概率分也不需要选人**，打分最早从 11 月开始。真正的营销增量需通过随机 A/B 实验确认。
 
 ## 队列迁移分析（标签稳定性）
 
-固定 2019-10 为基期，用**冻结的基期阈值**（固定沿用基期拟合的切分线，不让每月重算）逐月重算同一批用户的标签，回答“高价值直购 / 深度互动 / 常规已购 等标签是保持还是转化”（阈值冻结保证跨月可比，不受每月重新拟合的阈值漂移污染；Exploration 的 Z 标准化参数同样在基期拟合后冻结复用，避免“标尺”每月漂移）。产出 1 张 CSV（`run_cohort.py`，需 7 个月面板）：
+固定 2019-10 为基期，用**冻结的基期阈值**（固定沿用基期拟合的切分线，不让每月重算）逐月重算同一批用户的标签，回答“高价值直购 / 深度互动 / 常规已购 等标签是保持还是转化”（阈值冻结保证跨月可比，不受每月重新拟合的阈值漂移污染；Exploration 的 Z 标准化参数同样在基期拟合后冻结复用，避免“标尺”每月漂移）。产出 1 张 CSV（`python -m src.run_cohort`，需 7 个月面板）：
 
-- `cohort_frozen_labels.csv`：基期标签 × 月份 × 冻结标签占比（标签保持 / 转化；"无任何活动" = 当月完全无行为）。
+- `results/cohort_frozen_labels.csv`：基期标签 × 月份 × 冻结标签占比（标签保持 / 转化；"无任何活动" = 当月完全无行为）。
 
 核心结论：已购三标签的月度保持率较低（次月 10.9%~18.8%，6 个月后降至 1.8%~6.1%），标签是“月度快照”、需按月刷新；高价值深度互动粘性最强（次月购买占比 46.0%、无任何活动占比最低 24%），常规已购流失风险最高（40.5% 次月无任何活动）。
 
 
 
-## 目录
+## 目录结构
 
-- `main.ipynb`：可复现分析、时间外验证和名单导出（EDA → 分层 → 滚动验证（正式）→ 汇总 → 概率分选人 → 名单 → 队列迁移分析）；
-- `analysis.py`：特征构建、GMM 阈值、分层（含冻结阈值）、`build_month_tables` 月度表构造、跨月沉默、检验、`LR_predict_rank` 打分工具、滚动验证与队列迁移（另有可独立调用的 LR 基准评估函数）；
-- `config.py`：集中配置（路径、月份、随机种子、会话阈值）；
-- `run_rolling.py`：滚动验证入口（需 7 个月面板，生成 1 张结果 CSV）；
-- `run_cohort.py`：队列迁移分析入口（需 7 个月面板，生成冻结标签 CSV）；
-- `sample_user_cohort.py`：按用户哈希抽样生成 7 个月面板；
-- `tests/`：单元测试（25 个用例）：`python -m unittest discover -s tests`；
-- `data/panel_7months.parquet`：7 个月用户面板（全部分析的数据源）；
-- `data/_month_cache/`：Notebook 的「月度表缓存」——7 个月各一张月度表（该月用户特征 + 该月“当月独立分层”标签，一个月一个 `month_YYYY-MM.parquet`），打分 / 滚动验证 / 排序验证章节复用；删除该目录即可强制重算（随 `data/` 一起被忽略）；
-- `tracked_users_list_Nov.csv`：Notebook 运行后生成的候选触达名单（11 月高潜力首购 17,612 人，入库）；
-- `user_segments_all_Nov.csv`：全量分层名单（11 月活跃用户 18.5 万 × 5 类标签，体积大，不入库、可重算）。
+```
+ecommerce-user-behavior-segmentation/
+│
+├── src/                        # 核心代码（可作包导入：from src.analysis import ...）
+│   ├── __init__.py
+│   ├── analysis.py             # 特征构建、GMM 阈值、分层（含冻结阈值）、检验、LR 打分、滚动验证、队列迁移
+│   ├── config.py               # 集中配置（项目根路径、月份、随机种子、会话阈值）
+│   ├── run_rolling.py          # 滚动验证入口：python -m src.run_rolling
+│   ├── run_cohort.py           # 队列迁移分析入口：python -m src.run_cohort
+│   └── sample_user_cohort.py   # 按 user_id 哈希抽样生成 7 个月面板
+│
+├── notebooks/
+│   └── main.ipynb              # 可复现分析：EDA → 分层 → 滚动验证 → 打分选人 → 名单 → 队列迁移
+│
+├── docs/
+│   └── 数据分析报告.md          # 结论文档（面向业务的报告版）
+│
+├── results/                    # 运行产物（小体积结果入库，clone 后 Notebook 直接可读）
+│   ├── cohort_frozen_labels.csv
+│   ├── rolling_validation_results.csv
+│   └── tracked_users_list_Nov.csv
+│
+├── tests/
+│   └── test_analysis.py        # 24 个单元测试（合成数据，不依赖原始 CSV）
+│
+├── data/                       # 原始数据与缓存（体积大，不入库）
+│   ├── 2019-*.csv.gz
+│   ├── panel_7months.parquet   # 7 个月用户面板（全部分析的数据源）
+│   └── _month_cache/           # 月度表缓存（一个月一个 month_YYYY-MM.parquet，删除即强制重算）
+│
+├── README.md
+├── requirements.txt
+└── .gitignore
+```
+
+## 运行方式
+
+```bash
+pip install -r requirements.txt
+
+# 单元测试（24 个用例，合成数据，秒级完成）
+python -m unittest discover -s tests -v
+
+# 命令行入口（需 data/panel_7months.parquet，见下方抽样命令）
+python -m src.run_rolling      # 滚动时间外验证 → results/rolling_validation_results.csv（15-25 分钟）
+python -m src.run_cohort       # 队列迁移分析   → results/cohort_frozen_labels.csv（10-20 分钟）
+
+# 从按月 csv.gz 重建 7 个月面板
+python -m src.sample_user_cohort --input-dir data --out data/panel_7months.parquet --keep-per-mille 50
+
+# Notebook：「环境导入」cell 末尾会把项目根目录加入 sys.path，因此从根目录或 notebooks/ 启动都能跑
+jupyter lab notebooks/main.ipynb
+```
+
+路径约定：所有输入/输出路径都在 `src/config.py` 里从 `ROOT`（项目根目录）拼出，因此在哪个工作目录运行，读写位置都一致；结果统一落在 `results/`，缓存落在 `data/_month_cache/`。

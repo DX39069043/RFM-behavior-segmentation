@@ -1,10 +1,13 @@
 """队列迁移分析（标签视角）：固定基期分层 → 用冻结的基期阈值逐月重算标签。
 
 产出 1 张 CSV：
-- cohort_frozen_labels.csv  冻结阈值重算的标签占比（基期标签 × 月份 × 冻结标签，回答"标签是保持还是转化"）
+- results/cohort_frozen_labels.csv  冻结阈值重算的标签占比（基期标签 × 月份 × 冻结标签，回答"标签是保持还是转化"）
+
+运行（在项目根目录）：
+    python -m src.run_cohort
 """
-from config import BASE_MONTH, MONTHS, OUTPUT_COHORT_LABELS, PANEL_FILE
-from analysis import cohort_migration, load_panel
+from .analysis import cohort_migration, load_panel
+from .config import BASE_MONTH, MONTHS, OUTPUT_COHORT_LABELS, PANEL_FILE
 
 # 分析只需要这 7 列；category_code / brand 等字符串列不读，省 IO 与内存
 PANEL_COLUMNS = ['event_time', 'event_type', 'price', 'product_id', 'user_id', 'user_session', 'month']

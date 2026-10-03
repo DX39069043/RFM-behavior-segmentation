@@ -1,11 +1,12 @@
 """滚动时间外验证：读取 7 个月用户面板，逐对执行 训练月 t → 验证月 t+1。
 
-产出 rolling_validation_results.csv（实验一/二的逐组率对比）。
-注：LR 基准（nonbuyer_baseline / buyer_baseline）已移出滚动验证主流程，
-需要时可单独调用；历史基准结果保留在 rolling_baseline_results.csv。
+产出 results/rolling_validation_results.csv（实验一/二的逐组率对比）。
+
+运行（在项目根目录）：
+    python -m src.run_rolling
 """
-from config import MONTHS, OUTPUT_ROLLING, PANEL_FILE
-from analysis import build_month_tables, load_panel, rolling_validation
+from .analysis import build_month_tables, load_panel, rolling_validation
+from .config import MONTHS, OUTPUT_ROLLING, PANEL_FILE
 
 # 分析只需要这 7 列；category_code / brand 等字符串列不读，省 IO 与内存
 PANEL_COLUMNS = ['event_time', 'event_type', 'price', 'product_id',

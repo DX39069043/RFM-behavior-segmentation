@@ -3,9 +3,9 @@
 与 kaggle_user_panel_sampling.ipynb 完全相同的抽样逻辑（user_id 确定性哈希），
 供你已把全量按月文件下载到本地时使用。
 
-用法:
-    python sample_user_cohort.py --input-dir ./raw_data \\
-        --out panel_7months.parquet --keep-per-mille 50
+用法（在项目根目录执行，输出默认写入 data/panel_7months.parquet）:
+    python -m src.sample_user_cohort --input-dir data \\
+        --out data/panel_7months.parquet --keep-per-mille 50
 
 说明:
     - 每个用户要么全部月份都在面板里，要么完全不在（跨文件一致），可跨月追踪；

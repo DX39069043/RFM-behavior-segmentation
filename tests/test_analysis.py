@@ -8,16 +8,17 @@ import sys
 import tempfile
 import unittest
 
+# 项目根目录入 path，保证 `from src.analysis import ...` 在任何执行方式下都能找到包
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import pandas as pd
 
-from analysis import (build_features, build_month_tables, buyer_baseline,
-                      cohort_migration, Friction_and_Exploration, export_tracking,
-                      F_and_E_scalers, silent_buyer, gmm, load_panel,
-                      rolling_validation_rate_test, rolling_validation,
-                      LR_predict_rank, build_user_segment)
+from src.analysis import (build_features, build_month_tables,
+                          cohort_migration, Friction_and_Exploration, export_tracking,
+                          F_and_E_scalers, silent_buyer, gmm, load_panel,
+                          rolling_validation_rate_test, rolling_validation,
+                          LR_predict_rank, build_user_segment)
 
 
 def make_events(n_users: int = 6) -> pd.DataFrame:
@@ -328,42 +329,6 @@ class TestLRPredictRank(unittest.TestCase):
         self.assertLess(len(cand), len(seg))
 
 
-class TestBuyerBaseline(unittest.TestCase):
-    def test_metrics_and_preds(self):
-        # 手构已购用户表：确保存在高价值高摩擦用户、且验证期复购标签两类齐全
-        rng = np.random.default_rng(7)
-        n = 20
-        freq = rng.integers(1, 6, n)
-        freq[0] = 0
-        freq[2] = 0
-        df = pd.DataFrame({
-            'user_id': np.arange(n),
-            'Purchase_Frequency': freq,
-            'Total_Spending': rng.uniform(50, 5000, n),
-            'Recency_Days': rng.integers(1, 31, n),
-            'Pages_Viewed': rng.integers(1, 200, n),
-            'Estimated_Time': rng.uniform(100, 20000, n),
-            'Session_Count': rng.integers(1, 10, n),
-            'Cart_Products': rng.integers(0, 8, n),
-            'Value_Index': rng.uniform(0, 8, n),
-            'User_Segment': ['高价值高摩擦用户' if i in (1, 3) else '常规已购用户' for i in range(n)],
-        })
-        buyers = df[df['Purchase_Frequency'] > 0]
-        nov_ids = buyers['user_id'].sample(frac=0.5, random_state=1)
-        nov = pd.DataFrame({'user_id': nov_ids, 'event_type': ['purchase'] * len(nov_ids)})
-
-        res = buyer_baseline(df, nov)
-        m = res['metrics']
-        self.assertGreater(m['样本(已购用户)'], 0)
-        self.assertGreater(m['规则人群规模'], 0)
-        for key in ['规则 Top-k 复购率', 'LR Top-k 复购率', 'LR Bottom-k 复购率(风险视角)',
-                    '手工价值指数 AUC', 'LR AUC (5折OOF)']:
-            self.assertIn(key, m)
-        self.assertEqual(len(m['coefficients']), 7)      # RFM + 行为 7 维
-        for col in ['user_id', 'y', 'p_lr', 'rule', 'value_index']:
-            self.assertIn(col, res['preds'].columns)
-
-
 class TestRollingValidation(unittest.TestCase):
     def test_rolling_validation_synthetic(self):
         frames = []
@@ -388,8 +353,7 @@ class TestRollingValidation(unittest.TestCase):
         for col in ['训练月', '沉默月', '验证月', '实验', '目标人数', '目标购买率',
                     '对照人数', '对照购买率', '购买率差', 'p值']:
             self.assertIn(col, rates.columns)
-        # LR 基准（含基准表）已移出滚动验证主流程，返回值只保留验证表；
-        # 基准函数本身保留为独立评估工具（见 TestBuyerBaseline）。
+        # rolling_validation 只返回验证表（"基准表" 是历史版本的产物，已移除）
         self.assertNotIn('基准表', res)
 
     def test_load_panel(self):
